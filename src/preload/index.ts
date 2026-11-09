@@ -4,8 +4,11 @@ import { AGENT_IPC, type AgentRun, type RunSummary } from '../shared/agent'
 import { DRAFT_IPC, type TaskDraft, type DraftItem } from '../shared/drafts'
 import { PLANNING_IPC, type PlanningSnapshot, type CourseInput, type PlanningSettings, type PlanPreview, type CalendarExceptionInput, type DayOverride } from '../shared/planning'
 import { PROFILE_IPC, type MemoryFact, type MemoryInput, type DurationEstimate, type ProfileState, type CompletionDetail, type FeedbackInput } from '../shared/profile'
+import {STATISTICS_IPC,type StatisticsReport,type FrozenPlan,type PlanAuditInput} from '../shared/statistics'
 
 const api = {
+  statisticsRead:(date:string):Promise<StatisticsReport>=>ipcRenderer.invoke(STATISTICS_IPC.read,date),
+  statisticsFreeze:(date:string):Promise<FrozenPlan>=>ipcRenderer.invoke(STATISTICS_IPC.freeze,date),
   captureStart: (goal:string):Promise<AgentRun>=>ipcRenderer.invoke(DRAFT_IPC.capture,goal),
   batchPreview: (raw:string):Promise<AgentRun>=>ipcRenderer.invoke(DRAFT_IPC.batch,raw),
   draftGet: (id:string):Promise<TaskDraft>=>ipcRenderer.invoke(DRAFT_IPC.get,id),
@@ -39,14 +42,14 @@ const api = {
   courseDelete: (id: number): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.deleteCourse, id),
   planningSettings: (input: PlanningSettings): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.settings, input),
   planningPreview: (ids: number[], start: string, end: string): Promise<PlanPreview> => ipcRenderer.invoke(PLANNING_IPC.preview, ids, start, end),
-  planningCommit: (id: string): Promise<{ saved: true; count: number }> => ipcRenderer.invoke(PLANNING_IPC.commit, id),
+  planningCommit: (id: string,audit?:PlanAuditInput): Promise<{ saved: true; count: number }> => ipcRenderer.invoke(PLANNING_IPC.commit, id,audit),
   planningLock: (id: number, locked: boolean): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.lock, id, locked),
   planningRemove: (id: number): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.remove, id),
   agentStart: (goal: string): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.start, goal),
   agentSend: (id: string, text: string): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.send, id, text),
   agentLatest: (): Promise<AgentRun | null> => ipcRenderer.invoke(AGENT_IPC.latest),
   agentGet: (id: string): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.get, id),
-  agentConfirm: (id: string, accepted: boolean, version?:number): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.confirm, id, accepted, version),
+  agentConfirm: (id: string, accepted: boolean, version?:number,audit?:PlanAuditInput): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.confirm, id, accepted, version,audit),
   agentCancel: (id: string): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.cancel, id),
   onAgentChanged: (cb: () => void): (() => void) => {
     const listener = (): void => cb()

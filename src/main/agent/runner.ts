@@ -10,6 +10,7 @@ import * as planning from '../planning/service'
 import * as drafts from '../drafts/service'
 import { startReviewProposal } from '../drafts/reviewBridge'
 import type { ToolResult } from './contracts'
+import type {PlanAuditInput} from '@shared/statistics'
 
 const running = new Map<string, AbortController>()
 let notify: () => void = () => {}
@@ -34,6 +35,8 @@ get_calendar的effectiveDays包含停补课后的日程和当天正常/轻量容
 可用search_memory按需检索相关的用户确认记忆，保留来源和有效期；不需要把所有记忆加载。首次相关任务、缺个人偏好或避免重复询问时可检索；本次明确要求优先于历史偏好。无命中不编造。
 记忆scope必须使用保存时的分组原文，如“数学分析”，不能自行加course:等前缀。不知道或收到UNKNOWN_MEMORY_SCOPE时，省略scope按关键词检索一次，不直接当成不存在。
 用户只问记忆或估时事实时，先直接回答检索到的具体值及必要来源，不要用“要不要帮你规划”代替答案，也不必重新确认已确认的记忆。
+用户询问完成率、最近完成数量、主动推迟或估时误差时，先get_statistics读取实际统计，解释样本和口径。null/未启用/未冻结表示未知，不能说0%或100%；没有明确主动推迟记录时不能把全部改期称为拖延，不从少量反馈诊断用户性格。统计基线与改期原因不能由模型修改。
+统计用用户语言回答，不复述coverage等字段名。partial只表示统计在当日中途启用，不表示有部分计划或部分冻结。是否可计算计划完成率以baseline为准；baseline=null表示尚无冻结基线，应明确说尚未冻结计划。
 给用户的完整答复必须放进respond.text、finish_reply.text或ask_user.question中，不依赖同轮其他content；工具调用前不要声称操作已成功。
 任务personalEstimate/estimate_duration包含个人耗时校准。preview_plan会采用同一有效样本结果，不要把系数反复乘在已校准值上，也不要自动改动已确认执行块。
 需要了解上次耗时或难点时，可get_feedback_history按任务估时分组查询单次反馈；它不是长期画像，不能把一次困难说成永久能力不足。
@@ -132,7 +135,7 @@ export function cancelRun(idValue: unknown): AgentRun {
   notify()
   return store.getRun(id)
 }
-export function confirmChange(idValue: unknown, accepted: unknown, expectedDraftVersion?: number): AgentRun {
+export function confirmChange(idValue: unknown, accepted: unknown, expectedDraftVersion?: number, planAudit?:PlanAuditInput): AgentRun {
   const id = runId(idValue)
   if (typeof accepted !== 'boolean') throw new Error('确认参数无效。')
   getDb().transaction(() => {
@@ -143,7 +146,7 @@ export function confirmChange(idValue: unknown, accepted: unknown, expectedDraft
     let reply: string
     if (accepted) {
       try {
-        const result = applyConfirmation(run.scene, id, run.pending)
+        const result = applyConfirmation(run.scene, id, run.pending,planAudit)
         store.addEvent(id, 'tool', JSON.stringify({ tool: `confirmed_${confirmationKind(run.pending)}`, result: result.details }))
         reply = result.message
       } catch (error) {

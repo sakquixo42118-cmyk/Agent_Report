@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3'
-export const LATEST_SCHEMA_VERSION = 10
+export const LATEST_SCHEMA_VERSION = 11
 
 /** 简单版本迁移：user_version 存版本号，逐版本执行 DDL */
 export function runMigrations(db: Database.Database): void {
@@ -216,6 +216,59 @@ export function runMigrations(db: Database.Database): void {
         CREATE INDEX idx_dependencies_prerequisite ON task_dependencies(prerequisite_id);
       `)
       db.pragma('user_version = 10')
+    })()
+  }
+  if (version < 11) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE statistics_meta(id INTEGER PRIMARY KEY CHECK(id=1),enabled_at TEXT NOT NULL);
+        CREATE TABLE audit_context(id INTEGER PRIMARY KEY CHECK(id=1),actor TEXT NOT NULL,source TEXT NOT NULL,
+          reason TEXT NOT NULL,note TEXT NOT NULL,source_ref TEXT);
+        INSERT INTO audit_context VALUES(1,'system','system','unspecified','',NULL);
+        CREATE TABLE task_events(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,task_id INTEGER NOT NULL REFERENCES tasks(id),kind TEXT NOT NULL,
+          actor TEXT NOT NULL,source TEXT NOT NULL,reason TEXT NOT NULL,note TEXT NOT NULL,
+          before_json TEXT,after_json TEXT,source_ref TEXT,occurred_at TEXT NOT NULL,local_day TEXT NOT NULL,
+          idempotency_key TEXT UNIQUE
+        );
+        CREATE INDEX idx_task_events_day ON task_events(local_day,kind);
+        CREATE INDEX idx_task_events_task ON task_events(task_id,id);
+        CREATE INDEX idx_task_events_time ON task_events(occurred_at);
+        CREATE TABLE day_plan_snapshots(date TEXT PRIMARY KEY,frozen_at TEXT NOT NULL,method TEXT NOT NULL,time_zone TEXT NOT NULL);
+        CREATE TABLE day_plan_items(date TEXT NOT NULL REFERENCES day_plan_snapshots(date),task_id INTEGER NOT NULL REFERENCES tasks(id),
+          title TEXT NOT NULL,planned_start INTEGER NOT NULL,planned_end INTEGER NOT NULL,deadline_at TEXT,base_min INTEGER NOT NULL,
+          PRIMARY KEY(date,task_id));
+        ALTER TABLE completion_events ADD COLUMN stats_tracked INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE completion_events ADD COLUMN stats_valid INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE completion_events ADD COLUMN stats_day TEXT;
+        ALTER TABLE completion_events ADD COLUMN stats_timezone TEXT;
+        ALTER TABLE completion_events ADD COLUMN deadline_at TEXT;
+        ALTER TABLE completion_events ADD COLUMN deadline_confirmed INTEGER;
+      `)
+      db.prepare('INSERT INTO statistics_meta VALUES(1,?)').run(new Date().toISOString())
+      const value = (prefix: string): string => `json_object('title',substr(COALESCE(${prefix}.summary,${prefix}.content),1,500),'status',${prefix}.status,
+        'content',substr(${prefix}.content,1,500),'category',${prefix}.category,'tags',${prefix}.tags,'importance',${prefix}.importance,'urgency',${prefix}.urgency,
+        'baseMin',${prefix}.base_estimate_min,'estimateMin',${prefix}.estimate_min,'estimateGroup',${prefix}.estimate_group,
+        'deadlineAt',${prefix}.deadline_at,'deadlineConfirmed',${prefix}.deadline_confirmed,'rangeStart',${prefix}.range_start,'rangeEnd',${prefix}.range_end)`
+      db.exec(`
+        CREATE TRIGGER task_event_created AFTER INSERT ON tasks BEGIN
+          INSERT INTO task_events(task_id,kind,actor,source,reason,note,before_json,after_json,source_ref,occurred_at,local_day,idempotency_key)
+          SELECT NEW.id,'created',actor,source,reason,note,NULL,${value('NEW')},source_ref,NEW.created_at,date(NEW.created_at,'localtime'),'task-created:'||NEW.id FROM audit_context WHERE id=1;
+        END;
+        CREATE TRIGGER task_event_updated AFTER UPDATE ON tasks
+        WHEN OLD.status IS NOT NEW.status OR OLD.content IS NOT NEW.content OR OLD.summary IS NOT NEW.summary OR OLD.category IS NOT NEW.category OR OLD.tags IS NOT NEW.tags
+          OR OLD.importance IS NOT NEW.importance OR OLD.urgency IS NOT NEW.urgency OR OLD.base_estimate_min IS NOT NEW.base_estimate_min
+          OR OLD.estimate_min IS NOT NEW.estimate_min OR OLD.estimate_group IS NOT NEW.estimate_group
+          OR OLD.deadline_at IS NOT NEW.deadline_at OR OLD.deadline_confirmed IS NOT NEW.deadline_confirmed
+          OR OLD.range_start IS NOT NEW.range_start OR OLD.range_end IS NOT NEW.range_end
+        BEGIN
+          INSERT INTO task_events(task_id,kind,actor,source,reason,note,before_json,after_json,source_ref,occurred_at,local_day)
+          SELECT NEW.id,CASE WHEN NEW.status='archived' THEN 'archived' WHEN NEW.status='done' THEN 'completed'
+            WHEN OLD.status='done' THEN 'reopened' ELSE 'updated' END,
+            actor,source,reason,note,${value('OLD')},${value('NEW')},source_ref,NEW.updated_at,date(NEW.updated_at,'localtime') FROM audit_context WHERE id=1;
+        END;
+      `)
+      db.pragma('user_version = 11')
     })()
   }
 }

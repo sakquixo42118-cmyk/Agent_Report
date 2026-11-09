@@ -4,6 +4,9 @@ import type { AgentRun, RunSummary } from '@shared/agent'
 import PlanPreviewCard from './PlanPreviewCard.vue'
 import TaskDraftEditor from './TaskDraftEditor.vue'
 import {agentNavigation,openAgentRun} from '../stores/agentNavigation'
+import PlanReasonEditor from './PlanReasonEditor.vue'
+import type {PlanAuditInput} from '@shared/statistics'
+const planAudit=ref<PlanAuditInput>({reason:'unspecified',note:''})
 
 const run = ref<AgentRun | null>(null)
 const input = ref('')
@@ -15,6 +18,8 @@ const draftPending=computed(()=>!!run.value?.pending&&'type' in run.value.pendin
 const messageList = ref<HTMLElement | null>(null)
 const priority = computed(() => run.value?.pending && !('type' in run.value.pending) ? run.value.pending : null)
 const plan = computed(() => run.value?.pending && 'type' in run.value.pending && run.value.pending.type==='plan' ? run.value.pending.preview : null)
+const hasPlanMoves=computed(()=>plan.value?.blocks.some(b=>plan.value!.previous.some(p=>p.taskId===b.taskId&&(p.start!==b.start||p.end!==b.end))))
+watch(()=>plan.value?.id,()=>{planAudit.value={reason:'unspecified',note:''}})
 const memory = computed(() => run.value?.pending && 'type' in run.value.pending && run.value.pending.type==='memory' ? run.value.pending : null)
 watch(() => run.value?.events.length, async () => {
   await nextTick()
@@ -53,7 +58,7 @@ async function send(): Promise<void> {
 async function confirm(accepted: boolean): Promise<void> {
   if (!run.value || busy.value) return
   busy.value = true; error.value = ''
-  try { run.value = await window.api.agentConfirm(run.value.id, accepted) }
+  try { run.value = await window.api.agentConfirm(run.value.id, accepted,undefined,hasPlanMoves.value?{reason:planAudit.value.reason,note:planAudit.value.note}:undefined) }
   catch (e) { error.value = e instanceof Error ? e.message : String(e) }
   finally { busy.value = false }
 }
@@ -89,6 +94,7 @@ onUnmounted(() => removeListener?.())
     <div v-if="run?.pending && !draftPending" class="proposal">
       <template v-if="memory"><strong>确认记忆：{{ memory.fact.scope }} / {{ memory.fact.key }}</strong><p v-if="memory.before">原值：{{ memory.before.value }}</p><p>新值：{{ memory.fact.value }}</p><p>{{ memory.fact.expiresAt ? '有效至 '+new Date(memory.fact.expiresAt).toLocaleString('zh-CN') : '长期有效，可在个人记忆中移除' }}</p></template>
       <PlanPreviewCard v-if="plan" :preview="plan" />
+      <PlanReasonEditor v-if="hasPlanMoves" v-model="planAudit" />
       <template v-if="priority"><strong>调整「{{ priority.title }}」</strong>
       <p>重要度 {{ priority.before.importance }} → {{ priority.after.importance }}　紧急度 {{ priority.before.urgency }} → {{ priority.after.urgency }}</p>
       <p>{{ priority.reason }}</p></template>

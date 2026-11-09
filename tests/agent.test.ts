@@ -22,6 +22,8 @@ import * as feedback from '../src/main/feedback/service'
 import { processNext } from '../src/main/feedback/worker'
 import { draftTests } from './drafts.test'
 import { constraintsTests } from './constraints.test'
+import { statisticsTests } from './statistics.test'
+import * as statistics from '../src/main/statistics/service'
 import * as drafts from '../src/main/drafts/service'
 import { registerReviewProvider, startReviewProposal } from '../src/main/drafts/reviewBridge'
 
@@ -46,7 +48,7 @@ app.whenReady().then(async () => {
   try {
     setSettings(configured)
     const taskId = seed('测试报告'), otherId = seed('另一份报告')
-    await test('迁移至v10且重复执行不破坏数据', () => { runMigrations(getDb()); assert.equal(getDb().pragma('user_version', { simple: true }), 10); assert.ok(tasks.getTaskById(taskId)) })
+    await test('迁移至v11且重复执行不破坏数据', () => { runMigrations(getDb()); assert.equal(getDb().pragma('user_version', { simple: true }), 11); assert.ok(tasks.getTaskById(taskId)) })
     await test('带截止的过期判定不抛异常', () => { assert.equal(isOverdue({ dueAt: '2026-01-01T12:00:00' }, new Date('2026-01-02').getTime()), true); assert.equal(isOverdue({ dueAt: null }), false); assert.ok(Number.isFinite(computeScore(tasks.getTaskById(taskId)!))) })
     await test('明天下午与分钟日期解析', () => { const now = new Date(2026, 10, 5, 10); assert.equal(extractDueDate('明天下午3:30交报告', now), '2026-11-06T15:30:00'); assert.equal(extractDueDate('明天27:00', now), null) })
     await test('自动重评不锁定、人工修改锁定', () => { tasks.updateTask({ id: taskId, importance: 4 }, 'review'); assert.equal(tasks.getTaskById(taskId)!.manualLocked, false); tasks.updateTask({ id: otherId, importance: 4 }); assert.equal(tasks.getTaskById(otherId)!.manualLocked, true) })
@@ -174,13 +176,14 @@ app.whenReady().then(async () => {
     await profileTests(test)
     await draftTests(test)
     await constraintsTests(test)
+    await statisticsTests(test)
     if (process.argv.includes('--live')) {
       const keyFile = process.env.AGENT_TEST_KEY_FILE
       if (!keyFile) throw new Error('真实验证需要AGENT_TEST_KEY_FILE。')
       const key = readFileSync(keyFile, 'utf8').match(/sk-[A-Za-z0-9_.-]+/)?.[0]
       if (!key) throw new Error('未读到凭据。')
       setSettings({ aiBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', aiApiKey: key, aiModel: 'qwen-plus' })
-      if (!process.argv.includes('--profile-live')&&!process.argv.includes('--capture-live')&&!process.argv.includes('--scheduling-live')) {
+      if (!process.argv.includes('--profile-live')&&!process.argv.includes('--capture-live')&&!process.argv.includes('--scheduling-live')&&!process.argv.includes('--statistics-live')) {
       await test('真实千问原生工具查询并回传结果', async () => {
         const run = create('请查询当前未完成任务，只列出任务名，不修改数据。')
         await drive(run)
@@ -239,7 +242,7 @@ app.whenReady().then(async () => {
         assert.equal(tasks.getTaskById(id)!.deadlineAt, deadline)
       })
       }
-      if(!process.argv.includes('--capture-live')&&!process.argv.includes('--scheduling-live')) {
+      if(!process.argv.includes('--capture-live')&&!process.argv.includes('--scheduling-live')&&!process.argv.includes('--statistics-live')) {
       await test('真实千问按需检索确认记忆并使用来源回答', async () => {
         memory.saveFact({ scope: '数学分析', key: '学习阶段', value: '数学分析目前初学，需要先理解例题' }, null)
         const run = create('我确认过的数学分析学习阶段是什么？请先检索个人记忆，不要猜。')
@@ -275,7 +278,7 @@ app.whenReady().then(async () => {
         console.log(`LIVE completion decision=${job.status}`)
       })
       }
-      if(!process.argv.includes('--profile-live')&&!process.argv.includes('--scheduling-live')) {
+      if(!process.argv.includes('--profile-live')&&!process.argv.includes('--scheduling-live')&&!process.argv.includes('--statistics-live')) {
       async function waitRun(id:string):Promise<ReturnType<typeof store.getRun>>{
         for(let i=0;i<600&&store.getRun(id).status==='running';i++)await new Promise(r=>setTimeout(r,100))
         return store.getRun(id)
@@ -301,7 +304,7 @@ app.whenReady().then(async () => {
         assert.equal(confirmChange(r.id,true).status,'completed');assert.equal(tasks.getTaskById(drafts.getDraft(d.id).createdTaskIds[0])!.deadlineAt,null)
       })
       }
-      if(!process.argv.includes('--profile-live')&&!process.argv.includes('--capture-live')) {
+      if(!process.argv.includes('--profile-live')&&!process.argv.includes('--capture-live')&&!process.argv.includes('--statistics-live')) {
       await test('真实千问遵守停补课、临时占用、轻量容量和前置顺序试排',async()=>{
         const db=getDb(),day=dateKey(Date.now()+86400000)
         db.exec('DELETE FROM plan_blocks; DELETE FROM calendar_exceptions; DELETE FROM day_overrides; DELETE FROM task_dependencies; DELETE FROM calendar_courses;')
@@ -324,6 +327,24 @@ app.whenReady().then(async () => {
         assert.ok(p.blocks.reduce((sum,b)=>sum+(b.end-b.start)/60000,0)<=120);assert.equal(planning.listBlocks().length,0)
         assert.equal(confirmChange(run,true).status,'completed');assert.equal(planning.listBlocks().length,2)
         assert.equal(tasks.getTaskById(a)!.deadlineAt,null);assert.equal(tasks.getTaskById(b)!.deadlineAt,null)
+      })
+      }
+      if(!process.argv.includes('--profile-live')&&!process.argv.includes('--capture-live')&&!process.argv.includes('--scheduling-live')) {
+      await test('真实千问只读统计回答有效样本与未冻结状态，不编造完成率',async()=>{
+        const db=getDb();db.exec('DELETE FROM day_plan_items; DELETE FROM day_plan_snapshots; DELETE FROM task_events; UPDATE completion_events SET stats_tracked=0;')
+        const id=seed('S6真实统计验证');tasks.updateTask({id,estimateMin:60,estimateGroup:'S6真实统计',deadlineAt:null});tasks.completeTask(id,true)
+        const event=feedback.completionForTask(id)!.event
+        feedback.submitFeedback({eventId:event.id,actualMin:90,difficulty:'fit',interrupted:false,scopeChanged:false,note:'合成统计样本'})
+        const expected=statistics.readStatistics();assert.equal(expected.completedTasks,1);assert.equal(expected.estimates.baseMape,50);assert.equal(expected.currentBaseline,null)
+        const count=(db.prepare('SELECT COUNT(*) AS n FROM task_events').get() as {n:number}).n
+        const run=create('请用get_statistics读取今天的记录，只告诉我近7日完成多少项、原始估时MAPE是多少、今日冻结计划完成率是否可计算。不要创建或修改任务，不把未冻结说成0%或100%。')
+        await drive(run);const result=store.getRun(run);assert.equal(result.status,'completed',JSON.stringify(result.events))
+        assert.ok(result.events.some(e=>e.kind==='tool'&&e.text.includes('get_statistics')))
+        const answer=result.events.filter(e=>e.kind==='assistant').map(e=>e.text).join('\n')
+        assert.match(answer,/1/);assert.match(answer,/50/);assert.match(answer,/未冻结|(?:没有|暂无|无).*基线|尚未.*(?:冻结|基线)/)
+        assert.doesNotMatch(answer,/coverage|部分计划/)
+        assert.equal((db.prepare('SELECT COUNT(*) AS n FROM task_events').get() as {n:number}).n,count)
+        assert.equal((db.prepare('SELECT COUNT(*) AS n FROM day_plan_snapshots').get() as {n:number}).n,0)
       })
       }
       // 测试库退出后清空密钥，日志从不打印凭据。

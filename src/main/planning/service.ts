@@ -6,6 +6,9 @@ import type { Course, CourseInput, PlanningSettings, PlanningSnapshot, PlanBlock
 import { at, day, dateKey, daysBetween, freeIntervals, calendarOccupancy, daySettings, trial, overlaps } from './engine'
 import { durationEstimate, calibrationVersion } from '../memory/service'
 import { listExceptions, listDayOverrides, listDependencies, assertDependencies } from './constraints'
+import {recordPlanEvent,validatePlanAudit} from '../statistics/ledger'
+import {freezeDay} from '../statistics/service'
+import type {PlanAuditInput} from '@shared/statistics'
 export { listExceptions, listDayOverrides, listDependencies } from './constraints'
 
 function integer(v: unknown, min: number, max: number): number {
@@ -128,11 +131,12 @@ export function loadPreview(id: string, runId: string | null): PlanPreview {
   if (!row || row.run_id !== runId) throw new Error('试排不存在或不属于当前对话。')
   return JSON.parse(row.json)
 }
-export function commit(id: string, runId: string | null, now = Date.now()): { saved: true; count: number; unscheduled: PlanPreview['unscheduled'] } {
+export function commit(id: string, runId: string | null, now = Date.now(), audit?:PlanAuditInput): { saved: true; count: number; unscheduled: PlanPreview['unscheduled'] } {
   return getDb().transaction(() => {
     const p = loadPreview(id, runId)
     const existing = getDb().prepare('SELECT committed_json FROM plan_previews WHERE id=?').get(id) as { committed_json: string | null }
     if (existing.committed_json) return JSON.parse(existing.committed_json)
+    validatePlanAudit(audit)
     if (!p.blocks.length) throw new Error('没有可保存的执行时段。')
     if (now - new Date(p.createdAt).getTime() > 30 * 60000) throw new Error('试排已过期，请重新试排。')
     if (snapshot(p.startDate, p.endDate).version !== p.version) throw new Error('任务、课表、个人估时或计划已变化，请重新试排。')
@@ -144,9 +148,12 @@ export function commit(id: string, runId: string | null, now = Date.now()): { sa
     validateBlocks(p, now)
     const stmt = getDb().prepare('INSERT INTO plan_blocks(task_id,start_at,end_at,locked,reason,created_at) VALUES(?,?,?,?,?,?)')
     for (const b of p.blocks) {
+      const previous=p.previous.find(o=>o.taskId===b.taskId)
       getDb().prepare('DELETE FROM plan_blocks WHERE task_id=?').run(b.taskId)
       stmt.run(b.taskId, b.start, b.end, 0, b.reason, new Date(now).toISOString())
+      recordPlanEvent(b.taskId,previous?{...previous}:null,{...b},runId,`preview:${id}:task:${b.taskId}`,now,audit)
     }
+    for(const date of new Set(p.blocks.map(b=>dateKey(b.start))))if(date>=dateKey(now))freezeDay(date,now,'first_plan_confirmation')
     const result = { saved: true as const, count: p.blocks.length, unscheduled: p.unscheduled }
     getDb().prepare('UPDATE plan_previews SET committed_json=? WHERE id=?').run(JSON.stringify(result), id)
     event('plan_committed', { previewId: id, runId, previous: p.previous, blocks: p.blocks, result })
@@ -186,6 +193,7 @@ export function removeBlock(id: number): void {
     const removed=listBlocks().find(b=>b.id===id)
     assertDependencies(listBlocks().filter(b=>b.id!==id),listDependencies().filter(d=>d.prerequisiteId===removed?.taskId),Date.now())
     getDb().prepare('DELETE FROM plan_blocks WHERE id=?').run(id); event('block_removed', { id })
+    if(removed)recordPlanEvent(removed.taskId,{...removed},null,null,`remove-block:${id}`,Date.now())
   })()
 }
 

@@ -5,6 +5,10 @@ import { tasksStore } from '../stores/tasks'
 import { localDay, plusDays, clock, minute, formatTime } from '../lib/planningTime'
 import PlanPreviewCard from '../components/PlanPreviewCard.vue'
 import PlanningConstraintsEditor from '../components/PlanningConstraintsEditor.vue'
+import PlanReasonEditor from '../components/PlanReasonEditor.vue'
+import type {PlanAuditInput} from '@shared/statistics'
+const audit=ref<PlanAuditInput>({reason:'unspecified',note:''})
+const hasMoves=computed(()=>preview.value?.blocks.some(b=>preview.value!.previous.some(p=>p.taskId===b.taskId&&(p.start!==b.start||p.end!==b.end))))
 const api = window.api
 const startDate = ref(localDay()), endDate = computed(() => plusDays(startDate.value, 6))
 const data = ref<PlanningSnapshot | null>(null), error = ref(''), notice = ref(''), busy = ref(false), preview = ref<PlanPreview | null>(null)
@@ -38,12 +42,12 @@ async function addCourse(): Promise<void> {
   if (!error.value) courseName.value = ''
 }
 async function trial(): Promise<void> {
-  await action(async () => { preview.value = await window.api.planningPreview([...selected.value], startDate.value, endDate.value) }, '试排完成，请核对预览后保存。')
+  await action(async () => { preview.value = await window.api.planningPreview([...selected.value], startDate.value, endDate.value);audit.value={reason:'unspecified',note:''} }, '试排完成，请核对预览后保存。')
 }
 async function commit(): Promise<void> {
   if (!preview.value) return
   const id = preview.value.id
-  await action(async () => { await window.api.planningCommit(id); preview.value = null }, '计划已保存，截止时间未变。')
+  await action(async () => { await window.api.planningCommit(id,hasMoves.value?{reason:audit.value.reason,note:audit.value.note}:undefined); preview.value = null }, '计划已保存，截止时间未变。')
 }
 function style(b: { start: number; end: number }): Record<string, string> {
   const a = new Date(b.start), z = new Date(b.end), from = gridStart.value, to = gridEnd.value
@@ -87,7 +91,7 @@ onUnmounted(() => removeListener?.())
     <section class="panel"><h3>试排任务</h3><p>选择任务后，将在上方这7天内寻找连续空档。旧日期/候选期限先到任务的“时间设置”核对。也可直接在今日助理提出要求。</p>
       <div class="choices"><label v-for="t in pending" :key="t.id"><input v-model="selected" type="checkbox" :value="t.id" />{{ t.summary || t.content }} · {{ t.estimateMin }}分钟 <small v-if="!t.deadlineConfirmed">日期待确认</small></label></div>
       <button :disabled="busy || !selected.length" @click="trial">按课表试排（{{ selected.length }}项）</button>
-      <div v-if="preview" class="trial-result"><PlanPreviewCard :preview="preview" /><button :disabled="busy || !preview.blocks.length" @click="commit">确认保存这份计划</button><button class="secondary" @click="preview=null">放弃预览</button></div>
+      <div v-if="preview" class="trial-result"><PlanPreviewCard :preview="preview" /><PlanReasonEditor v-if="hasMoves" v-model="audit" /><button :disabled="busy || !preview.blocks.length" @click="commit">确认保存这份计划</button><button class="secondary" @click="preview=null">放弃预览</button></div>
     </section>
     <section class="panel"><h3>已保存执行时段</h3><p v-if="!data?.blocks.length">尚无执行安排。</p>
       <div v-for="b in data?.blocks" :key="b.id" class="saved-block"><div><strong>{{ b.title }}</strong><p>{{ formatTime(b.start) }} — {{ formatTime(b.end) }}</p></div><button :disabled="busy" @click="lock(b)">{{ b.locked ? '解锁' : '锁定' }}</button><button class="secondary" :disabled="busy" @click="action(() => api.planningRemove(b.id!), '执行安排已移除，任务及截止保留。')">移除安排</button></div>

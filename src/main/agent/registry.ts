@@ -2,9 +2,10 @@ import type { ToolDefinition } from './model'
 import type { ToolContext, ToolResult } from './contracts'
 import type { PendingChange } from '@shared/agent'
 import {row as runRow} from './store'
+import type {PlanAuditInput} from '@shared/statistics'
 export interface SceneDefinition { id: string; title: string; instructions: string; tools: string[]; confirmationKinds: string[] }
 export interface ToolRegistration { definition: ToolDefinition; effect: 'read' | 'draft' | 'propose' | 'respond'; execute: (args: Record<string, unknown>, context: ToolContext) => ToolResult }
-export interface ConfirmationHandler { apply: (runId: string, pending: PendingChange) => { message: string; details: unknown } }
+export interface ConfirmationHandler { apply: (runId: string, pending: PendingChange, planAudit?:PlanAuditInput) => { message: string; details: unknown } }
 const tools = new Map<string, ToolRegistration>(), scenes = new Map<string, SceneDefinition>(), confirmations = new Map<string, ConfirmationHandler>()
 function supported(schema:Record<string,unknown>,depth=0):void{
   const keys=['type','properties','required','additionalProperties','enum','minimum','maximum','minLength','maxLength','items','minItems','maxItems','uniqueItems','description','title','default','examples']
@@ -34,10 +35,10 @@ export function registerConfirmation(kind: string, handler: ConfirmationHandler)
   confirmations.set(kind, handler)
 }
 export function confirmationKind(p: PendingChange): string { return 'type' in p ? p.type : 'priority' }
-export function applyConfirmation(scene: string, runId: string, p: PendingChange): { message: string; details: unknown } {
+export function applyConfirmation(scene: string, runId: string, p: PendingChange, planAudit?:PlanAuditInput): { message: string; details: unknown } {
   const kind = confirmationKind(p), handler = confirmations.get(kind)
   if (!getScene(scene).confirmationKinds.includes(kind) || !handler) throw new Error('当前场景不允许该确认操作。')
-  return handler.apply(runId, p)
+  return handler.apply(runId, p, planAudit)
 }
 // 支持本仓库工具使用的JSON Schema子集，完整业务约束仍由领域服务校验。
 function valid(value: unknown, schema: Record<string, unknown>, depth = 0): boolean {

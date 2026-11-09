@@ -7,12 +7,14 @@ import type { ToolDefinition } from './model'
 import { createHash } from 'node:crypto'
 import * as memory from '../memory/service'
 import { registerTool } from './registry'
+import {readStatistics} from '../statistics/service'
 import type { ToolContext, ToolResult } from './contracts'
 export type { ToolContext, ToolResult } from './contracts'
 
 type Field = { type: 'string' | 'integer' | 'array'; description?: string; enum?: string[]; minimum?: number; maximum?: number; maxLength?: number; items?: object; minItems?: number; maxItems?: number }
 interface Spec { name: string; description: string; fields: Record<string, Field>; required: string[] }
 const specs: Spec[] = [
+  {name:'get_statistics',description:'读取本地已记录的近7日完成、冻结计划完成率、主动推迟与估时误差。旧历史未启用、未冻结或无样本会返回未知/空，不是零表现。仅明确标记主动推迟的操作才算主动延期；不从改期推断性格或原因。只读，不改变基线。',fields:{endDate:{type:'string',maxLength:10,description:'可选，YYYY-MM-DD，不能晚于今天。'}},required:[]},
   { name: 'search_memory', description: '按当前目标检索相关的用户确认记忆。可按估时分组scope筛选（并包含相关全局记忆），最多5条；无命中如实为空。记忆有来源/版本/有效期，本次明确要求优先。', fields: {
     query: { type: 'string', maxLength: 100 }, scope: { type: 'string', maxLength: 60, description: '可选，使用实际分组原文如“数学分析”或“全局”，不要加course:等前缀；不知道真实分组时省略。' }, limit: { type: 'integer', minimum: 1, maximum: 5 }
   }, required: ['query'] },
@@ -86,6 +88,15 @@ export function executeTool(name: string, raw: string, context: ToolContext): To
     if (spec.required.includes(key) && typeof value === 'string' && !value.trim()) return fail('INVALID_ARGUMENTS', `${key}不能为空。`)
   }
   try {
+    if(name==='get_statistics'){
+      const r=readStatistics(args.endDate as string|undefined)
+      return{ok:true,data:{startDate:r.startDate,endDate:r.endDate,enabledAt:r.enabledAt,timeZone:r.timeZone,completedTasks:r.completedTasks,
+        onTime:r.onTime,changes:r.changes,estimates:r.estimates,days:r.days.map(d=>({date:d.date,coverage:d.coverage,completed:d.completed,postponed:d.postponed,
+          baseline:d.baseline?{denominator:d.baseline.denominator,completed:d.baseline.completed,rate:d.baseline.rate,added:d.baseline.addedTaskIds.length}:null})),
+        definitions:{baseline:'baseline=null表示该日没有冻结基线，计划完成率不可计算。非空时为首次确认冻结的任务集合；后加不扩分母，移出/归档不缩分母',
+          coverage:'none=统计启用前；partial=当日中途启用，只记录启用后的时段；full=当日已启用。coverage描述记录时间范围，与是否冻结完全不同，partial不表示有部分计划或部分冻结。',
+          postpone:'用户明确选择主动推迟且开始时间后移的执行改期',estimate:'有效耗时反馈的平均绝对百分比误差，原始和计划时长分别计算'}},sourceRefs:[`statistics:${r.startDate}:${r.endDate}`]}
+    }
     if (name === 'get_feedback_history') return { ok: true, data: { records: memory.recentFeedback(String(args.scope), Number(args.limit ?? 5)) } }
     if (name === 'search_memory') {
       if (args.scope !== undefined && !memory.hasScope(String(args.scope))) return fail('UNKNOWN_MEMORY_SCOPE', '没有这个记忆分组。scope需使用保存时的原文，不要加course:等前缀；请省略scope按关键词重查，不要据此断言没有相关记忆。')
@@ -147,7 +158,7 @@ export function applyPriorityChange(runId: string, pending: PriorityChange): obj
     const current = tasks.getTaskById(pending.taskId)
     if (!current || current.status !== 'pending' || current.updatedAt !== pending.expectedUpdatedAt ||
       current.importance !== pending.before.importance || current.urgency !== pending.before.urgency) throw new Error('任务已变化，本草案已失效。请重新查询后再调整。')
-    const changed = tasks.updateTask({ id: current.id, ...pending.after })!
+    const changed = tasks.updateTask({ id: current.id, ...pending.after },'agent')!
     const result = { taskId: current.id, before: pending.before, after: pending.after, updatedAt: changed.updatedAt, saved: true }
     getDb().prepare('INSERT INTO agent_actions(run_id,action_key,result_json,created_at) VALUES(?,?,?,?)')
       .run(runId, actionKey, JSON.stringify(result), new Date().toISOString())

@@ -4,6 +4,8 @@ import { localSummary, toLocalIso } from '../ai/rules'
 import { randomUUID } from 'node:crypto'
 import { scopeKey } from '../memory/service'
 import { guardTaskDependencyChange } from '../planning/constraints'
+import { withAudit } from '../statistics/ledger'
+import { dateKey } from '../planning/engine'
 
 /** DB 行 → Task DTO */
 interface TaskRow {
@@ -85,6 +87,7 @@ function now(): string {
 
 /** 新建任务：先进收件箱，由 analyzer 分析后转 pending（未配置 AI 时规则兜底同样转 pending） */
 export function createTask(input: TaskCreateInput): Task {
+  return withAudit({actor:'user',source:'manual'},()=>{
   const db = getDb()
   const ts = now()
   const info = db
@@ -93,10 +96,12 @@ export function createTask(input: TaskCreateInput): Task {
     )
     .run(input.content.trim(), ts, ts)
   return getTaskById(Number(info.lastInsertRowid))!
+  })
 }
 
 /** 批量创建（批量导入已带分析结果，直接进 pending；同一次导入归入同一项目链条组） */
 export function batchCreateTasks(items: BatchParsedTask[], aiStatus: AiStatus): number {
+  return withAudit({actor:'user',source:'manual'},()=>{
   const db = getDb()
   const ts = now()
   const projectId = `proj_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
@@ -133,10 +138,12 @@ export function batchCreateTasks(items: BatchParsedTask[], aiStatus: AiStatus): 
   })
   tx(items)
   return items.length
+  })
 }
 
 /** AI/规则分析结果落库：写字段 + inbox→pending + ai_status */
 export function applyAnalysis(id: number, result: AiAnalysisResult, aiStatus: AiStatus): void {
+  return withAudit({actor:'system',source:'analyzer'},()=>{
   const db = getDb()
   db.prepare(
     `UPDATE tasks SET
@@ -162,6 +169,7 @@ export function applyAnalysis(id: number, result: AiAnalysisResult, aiStatus: Ai
     now(), result.dueAt, result.dueAt ? 0 : 1, result.dueAt ? 'parsed' : 'none', result.estimateMin, aiStatus === 'ok' ? 'model' : 'rule',
     id
   )
+  })
 }
 
 /** 重试分析：重置 ai_status */
@@ -172,9 +180,11 @@ export function markAiStatus(id: number, status: AiStatus): void {
 
 /** 重试分析：pending 任务拉回收件箱重走完整流程 */
 export function moveBackToInbox(id: number): void {
+  return withAudit({actor:'system',source:'analyzer'},()=>{
   const db = getDb()
   guardTaskDependencyChange(id,'inbox')
   db.prepare(`UPDATE tasks SET status = 'inbox', updated_at = ? WHERE id = ?`).run(now(), id)
+  })
 }
 
 /** 按 id 查 */
@@ -253,6 +263,7 @@ export function listProjects(): ProjectGroup[] {
 
 /** 给项目加一个环节（追加到链条末尾） */
 export function addChainStep(projectId: string, content: string, dueAt: string | null): Task | null {
+  return withAudit({actor:'user',source:'manual'},()=>{
   const db = getDb()
   const info = db
     .prepare(
@@ -272,6 +283,7 @@ export function addChainStep(projectId: string, content: string, dueAt: string |
   const inserted = db.prepare(`SELECT MAX(id) AS id FROM tasks WHERE project_id = ?`).get(projectId) as { id: number }
   if (dueAt) updateTask({ id: inserted.id, deadlineAt: dueAt })
   return getTaskById(inserted.id)
+  })
 }
 
 /** 环节上移/下移一位（交换 chain_order） */
@@ -295,7 +307,8 @@ export function moveChainStep(id: number, dir: 'up' | 'down'): Task[] | null {
 }
 
 /** 更新任务部分字段 */
-export function updateTask(input: TaskUpdateInput, source: 'user' | 'review' = 'user'): Task | null {
+export function updateTask(input: TaskUpdateInput, source: 'user' | 'review' | 'agent' = 'user'): Task | null {
+  return withAudit({actor:source==='review'?'system':'user',source:source==='agent'?'agent_confirmed':source==='review'?'analyzer':'manual'},()=>{
   const db = getDb()
   const existing = getTaskById(input.id)
   if (!existing) return null
@@ -319,12 +332,12 @@ export function updateTask(input: TaskUpdateInput, source: 'user' | 'review' = '
     sets.push('importance = ?')
     params.push(clamp(input.importance, 1, 5))
     // 用户手动调重要性 → 锁定，AI 每日重评不再覆盖
-    if (source === 'user') sets.push('manual_locked = 1')
+    if (source !== 'review') sets.push('manual_locked = 1')
   }
   if (input.urgency !== undefined) {
     sets.push('urgency = ?')
     params.push(clamp(input.urgency, 1, 5))
-    if (source === 'user') sets.push('manual_locked = 1')
+    if (source !== 'review') sets.push('manual_locked = 1')
   }
   if (input.estimateMin !== undefined) {
     if (!Number.isInteger(input.estimateMin) || input.estimateMin < 5 || input.estimateMin > 1440) throw new Error('预计耗时必须是5—1440分钟的整数。')
@@ -356,32 +369,38 @@ export function updateTask(input: TaskUpdateInput, source: 'user' | 'review' = '
 
   db.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ?`).run(...params)
   return getTaskById(input.id)
+  })
 }
 
 /** 完成/取消完成 */
-export function completeTask(id: number, done: boolean): Task | null {
+export function completeTask(id: number, done: boolean, clock = Date.now()): Task | null {
+  return withAudit({actor:'user',source:'manual'},()=>{
   const db = getDb()
   if (!Number.isSafeInteger(id) || id < 1 || typeof done !== 'boolean') throw new Error('完成参数无效。')
   return db.transaction(() => {
-    const task = getTaskById(id), ts = now()
+    const task = getTaskById(id), ts = new Date(clock).toISOString()
     if (!task || task.status === 'archived') return null
     if ((task.status === 'done') === done) return task
     if (done) {
       const cycle = task.completionSeq + 1, eventId = randomUUID()
       const block = db.prepare('SELECT start_at,end_at FROM plan_blocks WHERE task_id=?').get(id) as { start_at: number; end_at: number } | undefined
       db.prepare("UPDATE tasks SET status='done',completed_at=?,updated_at=?,completion_seq=? WHERE id=?").run(ts, ts, cycle, id)
-      db.prepare(`INSERT INTO completion_events(id,task_id,cycle,title,group_key,estimate_source,base_min,planned_min,had_plan,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?)`).run(eventId, id, cycle, task.summary || task.content, scopeKey(task.estimateGroup), task.estimateSource,
-          task.baseEstimateMin, block ? (block.end_at - block.start_at) / 60000 : task.estimateMin, block ? 1 : 0, ts)
+      db.prepare(`INSERT INTO completion_events(id,task_id,cycle,title,group_key,estimate_source,base_min,planned_min,had_plan,created_at,
+        stats_tracked,stats_valid,stats_day,stats_timezone,deadline_at,deadline_confirmed)
+        VALUES(?,?,?,?,?,?,?,?,?,?,1,1,?,?,?,?)`).run(eventId, id, cycle, task.summary || task.content, scopeKey(task.estimateGroup), task.estimateSource,
+          task.baseEstimateMin, block ? (block.end_at - block.start_at) / 60000 : task.estimateMin, block ? 1 : 0, ts,
+          dateKey(clock),Intl.DateTimeFormat().resolvedOptions().timeZone,task.deadlineAt,task.deadlineConfirmed?1:0)
       const config = db.prepare('SELECT enabled FROM profile_settings WHERE id=1').get() as { enabled: number }
       if (config.enabled) db.prepare('INSERT INTO completion_jobs(event_id) VALUES(?)').run(eventId)
     } else {
       guardTaskDependencyChange(id,'undo')
       db.prepare("UPDATE tasks SET status='pending',completed_at=NULL,updated_at=? WHERE id=?").run(ts, id)
+      db.prepare('UPDATE completion_events SET stats_valid=0 WHERE task_id=?').run(id)
       invalidateCompletions(id)
     }
     return getTaskById(id)
   })()
+  })
 }
 
 function invalidateCompletions(id: number): void {
@@ -450,6 +469,7 @@ export function displaceTaskTo(id: number, newDueIso: string): number {
 
 /** 软删除 → archived */
 export function deleteTask(id: number): boolean {
+  return withAudit({actor:'user',source:'manual'},()=>{
   const db = getDb()
   return db.transaction(() => {
     guardTaskDependencyChange(id,'archive')
@@ -457,6 +477,7 @@ export function deleteTask(id: number): boolean {
     invalidateCompletions(id)
     return info.changes > 0
   })()
+  })
 }
 
 // ===== 项目链条 =====
@@ -498,6 +519,7 @@ export function listChains(): ChainGroup[] {
 
 /** 给链条追加一个环节（排到最后） */
 export function appendChainTask(projectId: string, content: string): Task | null {
+  return withAudit({actor:'user',source:'manual'},()=>{
   const db = getDb()
   const last = db
     .prepare(`SELECT MAX(chain_order) AS m FROM tasks WHERE project_id = ?`)
@@ -514,6 +536,7 @@ export function appendChainTask(projectId: string, content: string): Task | null
   // 更新组内 total
   db.prepare(`UPDATE tasks SET chain_total = ? WHERE project_id = ?`).run(total, projectId)
   return getTaskById(Number(info.lastInsertRowid))
+  })
 }
 
 /** 链条整体平移：所有未完成环节的截止日期 +N 天 */
@@ -537,6 +560,7 @@ export function shiftChain(projectId: string, days: number): number {
 
 /** 删除链条中一个环节（其余环节 order 顺序收缩） */
 export function removeChainTask(id: number): boolean {
+  return withAudit({actor:'user',source:'manual'},()=>{
   const db = getDb()
   const task = getTaskById(id)
   if (!task || !task.projectId) return deleteTask(id)
@@ -551,6 +575,7 @@ export function removeChainTask(id: number): boolean {
     `UPDATE tasks SET chain_total = (SELECT COUNT(*) FROM tasks t2 WHERE t2.project_id = tasks.project_id AND t2.status != 'archived') WHERE project_id = ?`
   ).run(task.projectId)
   return true
+  })
 }
 
 function clamp(v: number, min: number, max: number): number {

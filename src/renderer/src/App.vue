@@ -89,7 +89,7 @@ function provideToast(): void {
           <span v-if="n.key==='today' && feedbackState.unread" class="unread-badge" :aria-label="feedbackState.unread+'条未读完成回顾'">{{ feedbackState.unread }}</span>
         </button>
       </nav>
-      <div class="sidebar-footer">v0.2 α5 · 约束调度</div>
+      <div class="sidebar-footer">v0.2 α6 · 执行回顾</div>
     </aside>
 
     <main class="main">

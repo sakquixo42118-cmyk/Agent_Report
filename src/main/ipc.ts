@@ -17,6 +17,8 @@ import * as feedback from './feedback/service'
 import { configureWorker, wakeWorker } from './feedback/worker'
 import { DRAFT_IPC, type DraftItem } from '@shared/drafts'
 import * as drafts from './drafts/service'
+import {STATISTICS_IPC,type PlanAuditInput} from '@shared/statistics'
+import * as statistics from './statistics/service'
 
 /** 广播任务变化（分析完成/手机端操作后刷新所有视图） */
 export function broadcastTaskChanged(win: BrowserWindow | null): void {
@@ -27,6 +29,8 @@ export function broadcastTaskChanged(win: BrowserWindow | null): void {
 
 export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
   const changed = (): void => broadcastTaskChanged(getWin())
+  ipcMain.handle(STATISTICS_IPC.read,(_e,date:string)=>statistics.readStatistics(date))
+  ipcMain.handle(STATISTICS_IPC.freeze,(_e,date:string)=>{const result=statistics.freezeDay(date);changed();return result})
   const agentChanged = (): void => { changed(); const win=getWin(); if(win&&!win.isDestroyed())win.webContents.send(AGENT_IPC.changed) }
   ipcMain.handle(DRAFT_IPC.capture, (_e, goal: unknown) => agent.startCapture(goal))
   ipcMain.handle(DRAFT_IPC.batch, (_e, raw: unknown) => agent.startBatch(raw))
@@ -65,7 +69,7 @@ export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
   ipcMain.handle(PLANNING_IPC.deleteCourse, (_e, id: number) => { planning.deleteCourse(id); changed() })
   ipcMain.handle(PLANNING_IPC.settings, (_e, input) => { planning.saveSettings(input); changed() })
   ipcMain.handle(PLANNING_IPC.preview, (_e, ids: number[], start: string, end: string) => planning.preview(ids, start, end))
-  ipcMain.handle(PLANNING_IPC.commit, (_e, id: string) => { const result = planning.commit(id, null); changed(); return result })
+  ipcMain.handle(PLANNING_IPC.commit, (_e, id: string, audit?:PlanAuditInput) => { const result = planning.commit(id, null,Date.now(),audit); changed(); return result })
   ipcMain.handle(PLANNING_IPC.lock, (_e, id: number, locked: boolean) => { planning.lockBlock(id, locked); changed() })
   ipcMain.handle(PLANNING_IPC.remove, (_e, id: number) => { planning.removeBlock(id); changed() })
   setBroadcastFn(() => broadcastTaskChanged(getWin()))
@@ -83,7 +87,7 @@ export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
     if (typeof id !== 'string' || id.length > 100) throw new Error('对话编号无效。')
     return agentStore.getRun(id)
   })
-  ipcMain.handle(AGENT_IPC.confirm, (_e, id: unknown, accepted: unknown, version?:number) => agent.confirmChange(id, accepted, version))
+  ipcMain.handle(AGENT_IPC.confirm, (_e, id: unknown, accepted: unknown, version?:number,audit?:PlanAuditInput) => agent.confirmChange(id, accepted, version,audit))
   ipcMain.handle(AGENT_IPC.history, () => agentStore.runHistory())
   ipcMain.handle(AGENT_IPC.cancel, (_e, id: unknown) => agent.cancelRun(id))
 

@@ -1,63 +1,56 @@
 <script setup lang="ts">
-// M7 阶段实现完整统计；当前为占位页，展示基础数字
-import { computed } from 'vue'
-import { tasksStore } from '../stores/tasks'
-
-const doneCount = computed(() => tasksStore.tasks.filter((t) => t.status === 'done').length)
-const activeCount = computed(() => tasksStore.tasks.filter((t) => t.status === 'inbox' || t.status === 'pending').length)
+import {ref,computed,onMounted,onUnmounted,watch} from 'vue'
+import {PLAN_REASON_LABELS,type StatisticsReport,type TaskEvent,type PlanChangeReason} from '@shared/statistics'
+import {localDay,formatTime} from '../lib/planningTime'
+const endDate=ref(localDay()),data=ref<StatisticsReport|null>(null),error=ref(''),busy=ref(false)
+const baseline=computed(()=>data.value?.currentBaseline)
+const peak=computed(()=>Math.max(1,...(data.value?.days.map(d=>d.completed??0)??[])))
+const pct=(n:number|null|undefined):string=>n==null?'—':`${(n*100).toFixed(1)}%`
+const number=(n:number|null|undefined):string=>n==null?'—':n.toFixed(1)
+const kindLabels:Record<string,string>={created:'新增事项',updated:'修改事项',completed:'完成任务',reopened:'撤销完成',archived:'归档任务',plan_created:'新增执行安排',rescheduled:'调整执行安排',postponed:'主动推迟',plan_removed:'移除执行安排'}
+const sourceLabels:Record<string,string>={manual:'用户操作',agent_confirmed:'助理建议后确认',draft_confirmed:'草案确认',analyzer:'自动分析',system:'系统记录'}
+const title=(e:TaskEvent):string=>String(e.after?.title??e.before?.title??`任务#${e.taskId}`)
+function detail(e:TaskEvent):string{
+  if(e.before?.start||e.after?.start)return `${e.before?.start?formatTime(Number(e.before.start)):'未安排'} → ${e.after?.start?formatTime(Number(e.after.start)):'已移除'}`
+  const fields=[['importance','重要度'],['urgency','紧急度'],['baseMin','原始耗时'],['deadlineAt','截止']]
+  return fields.filter(([key])=>e.before&&e.after&&e.before[key]!==e.after[key]).map(([key,label])=>`${label}：${e.before![key]??'无'} → ${e.after![key]??'无'}`).join('；')
+}
+let offTask:(()=>void)|undefined,offProfile:(()=>void)|undefined,timer:ReturnType<typeof setInterval>|undefined,sequence=0
+async function refresh():Promise<void>{const serial=++sequence;error.value='';try{const result=await window.api.statisticsRead(endDate.value);if(serial===sequence)data.value=result}catch(e){if(serial===sequence)error.value=String(e)}}
+async function freeze():Promise<void>{busy.value=true;error.value='';try{await window.api.statisticsFreeze(endDate.value);await refresh()}catch(e){error.value=String(e)}finally{busy.value=false}}
+watch(endDate,()=>void refresh())
+onMounted(()=>{void refresh();offTask=window.api.onTaskChanged(()=>void refresh());offProfile=window.api.onProfileChanged(()=>void refresh());timer=setInterval(()=>void refresh(),60000)})
+onUnmounted(()=>{offTask?.();offProfile?.();if(timer)clearInterval(timer);sequence++})
 </script>
-
 <template>
-  <div class="stats-view">
-    <header class="view-header">
-      <h2>统计</h2>
-    </header>
-
-    <div class="cards">
-      <div class="card">
-        <div class="num">{{ activeCount }}</div>
-        <div class="label">进行中</div>
+  <div class="stats-view"><header><div><h2>执行回顾</h2><p>用记录回看计划、完成与改期</p></div><label>统计截止日<input v-model="endDate" type="date" :max="localDay()" /></label></header>
+    <p v-if="error" role="alert" class="error">{{ error }}</p>
+    <template v-if="data">
+      <p class="coverage">记录自 {{ new Date(data.enabledAt).toLocaleString('zh-CN') }} 启用；仅统计本软件已记录操作。启用前不补画历史，未冻结或无样本显示“—”。</p>
+      <div class="metric-cards">
+        <article><span>选中日 · 冻结计划完成率</span><strong>{{ pct(baseline?.rate) }}</strong><small>{{ baseline ? `${baseline.completed} / ${baseline.denominator} 项基线任务` : '该日尚无计划基线' }}</small></article>
+        <article><span>近7日 · 完成任务</span><strong>{{ data.completedTasks??'—' }}<i>项</i></strong><small>按有效完成记录去重</small></article>
+        <article><span>近7日 · 按时完成率</span><strong>{{ pct(data.onTime.rate) }}</strong><small>{{ data.onTime.completedOnTime }} / {{ data.onTime.eligible }} 次有明确截止的完成记录</small></article>
+        <article><span>近7日 · 主动推迟任务比例</span><strong>{{ pct(data.changes.postponeRate) }}</strong><small>{{ data.changes.postponedTasks }} / {{ data.changes.plannedTasks }} 项计划任务</small></article>
       </div>
-      <div class="card">
-        <div class="num">{{ doneCount }}</div>
-        <div class="label">累计完成</div>
-      </div>
-    </div>
-
-    <div class="empty">
-      <div class="icon">📊</div>
-      <p>完成率、拖延分析等图表将在后续版本提供</p>
-    </div>
+      <div class="overview"><section class="panel"><h3>近7日完成趋势</h3><div class="chart" role="img" aria-label="近7日本地记录的完成任务数量">
+        <div v-for="d in data.days" :key="d.date" class="column" :class="{uncovered:d.coverage==='none'}"><b>{{ d.completed??'—' }}</b><div class="bar-space"><div class="bar" :style="{height:`${d.completed==null?0:(d.completed/peak)*100}%`}"></div></div><span>{{ d.date.slice(5) }}</span><small>{{ d.coverage==='none'?'未启用':d.coverage==='partial'?'启用日':'已记录' }}</small></div>
+      </div><p>同一任务同日只计一次；撤销完成会修正有效记录。提前完成的任务记在实际完成日。</p></section>
+      <section class="panel changes"><h3>执行改期与原因</h3><div class="change-count"><strong>{{ data.changes.postponeEvents }}</strong><span>次明确主动推迟</span></div><p>其他手动改期 {{ data.changes.otherManualMoves }} 次 · 助理建议后确认 {{ data.changes.agentConfirmedMoves }} 次 · 系统自动改期 {{ data.changes.systemMoves }} 次</p><p>“主动推迟”只统计你明确选择该原因、且开始时间后移的操作。助理确认次数可能包含你标记的主动推迟，两者不相加。</p><ul><li v-for="r in data.changes.reasons" :key="r.reason">{{ PLAN_REASON_LABELS[r.reason as PlanChangeReason]??r.reason }} <b>{{ r.count }}</b></li></ul><p v-if="!data.changes.reasons.length">本时间段没有执行改期记录。</p></section></div>
+      <section class="panel baseline"><div class="panel-heading"><h3>{{ endDate }} · 计划基线</h3><button v-if="!baseline&&endDate===localDay()" :disabled="busy" @click="freeze">冻结已有今日计划</button></div>
+        <template v-if="baseline"><p>{{ new Date(baseline.frozenAt).toLocaleString('zh-CN') }} {{ baseline.method==='first_plan_confirmation'?'首次确认后自动冻结':'手动冻结' }} · {{ baseline.timeZone }}。冻结分母{{ baseline.denominator }}项，后加{{ baseline.addedTaskIds.length }}项单列；移出、归档不缩分母。状态按当前有效记录回看。</p>
+          <div class="baseline-items"><article v-for="i in baseline.items" :key="i.taskId"><div><strong>{{ i.title }}</strong><small>基线时段 {{ formatTime(i.plannedStart) }}—{{ formatTime(i.plannedEnd) }}</small></div><span :class="i.state">{{ {completed:'已完成',moved_out:'已移出',archived:'已归档',pending:'待完成'}[i.state] }}</span></article></div>
+        </template><p v-else>该日没有冻结基线，暂不计算计划完成率。新版每个日期首次确认执行计划时自动冻结；旧计划可在当天手动冻结，不能回填过去。</p>
+      </section>
+      <section class="panel"><h3>耗时估计误差</h3><div class="estimate-summary"><span>有效样本 <b>{{ data.estimates.sampleCount }}</b></span><span>原始估时MAPE <b>{{ number(data.estimates.baseMape) }}%</b></span><span>计划时长MAPE <b>{{ number(data.estimates.plannedMape) }}%</b></span><span>原始估时平均绝对误差 <b>{{ number(data.estimates.meanAbsoluteMin) }}分钟</b></span></div>
+        <p>MAPE为每条有效样本绝对误差百分比的平均值，越低表示与实际耗时越接近。缺耗时、中断或范围变化的{{ data.estimates.excluded }}条完成记录不参与。按任务完成日归属，后补的有效反馈会更新回顾。</p>
+        <div v-if="data.estimates.groups.length" class="table-scroll"><table><thead><tr><th>估时分组</th><th>来源</th><th>样本</th><th>原始MAPE</th><th>计划MAPE</th></tr></thead><tbody><tr v-for="g in data.estimates.groups" :key="JSON.stringify([g.group,g.source])"><td>{{ g.group }}</td><td>{{ {user:'用户估时',model:'模型估时',rule:'规则估时'}[g.source as 'user']??g.source }}</td><td>{{ g.count }}</td><td>{{ number(g.baseMape) }}%</td><td>{{ number(g.plannedMape) }}%</td></tr></tbody></table></div><p v-else>目前没有有效耗时样本。完成任务后可补充实际耗时。</p>
+      </section>
+      <section class="panel"><h3>逐日核对</h3><div class="table-scroll"><table><thead><tr><th>日期</th><th>记录范围</th><th>完成任务</th><th>基线完成</th><th>后加计划</th><th>主动推迟次数</th></tr></thead><tbody><tr v-for="d in data.days" :key="d.date"><td>{{ d.date }}</td><td>{{ {none:'未启用',partial:'当日启用后',full:'已启用'}[d.coverage] }}</td><td>{{ d.completed??'—' }}</td><td>{{ d.baseline?`${d.baseline.completed}/${d.baseline.denominator}`:'未冻结' }}</td><td>{{ d.baseline?.addedTaskIds.length??'—' }}</td><td>{{ d.postponed??'—' }}</td></tr></tbody></table></div></section>
+      <details class="panel"><summary>操作记录 · 本时间段最近40条</summary><p>记录事项变更前后摘要和执行改期；归档保留事实记录。未明确说明原因的改期不会推断为主动拖延。</p><div v-for="e in data.recentEvents" :key="e.id" class="event"><time>{{ new Date(e.occurredAt).toLocaleString('zh-CN') }}</time><strong>{{ kindLabels[e.kind]??e.kind }} · {{ title(e) }}</strong><span>{{ sourceLabels[e.source]??e.source }} · {{ PLAN_REASON_LABELS[e.reason as PlanChangeReason]??e.reason }}</span><small v-if="detail(e)">{{ detail(e) }}</small><small v-if="e.note">{{ e.note }}</small></div><p v-if="!data.recentEvents.length">本时间段没有操作记录。</p></details>
+    </template><p v-else-if="!error">正在读取统计…</p>
   </div>
 </template>
-
 <style scoped>
-.view-header {
-  margin-bottom: 16px;
-}
-.view-header h2 {
-  font-size: 20px;
-}
-.cards {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 20px;
-}
-.card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px 24px;
-  min-width: 120px;
-}
-.num {
-  font-size: 28px;
-  font-weight: 600;
-  color: var(--primary);
-}
-.label {
-  color: var(--text-3);
-  font-size: 12px;
-  margin-top: 4px;
-}
+.stats-view{padding-bottom:20px}.stats-view>header,.panel-heading{display:flex;justify-content:space-between;align-items:center;gap:12px}.stats-view h2{font-size:21px;margin:0}.stats-view>header p,.coverage{font-size:12px;color:var(--text-3);line-height:1.7}.stats-view label{display:grid;gap:6px;font-size:12px}.stats-view input{padding:7px;border:1px solid var(--border);border-radius:7px;background:var(--panel);color:var(--text)}.metric-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}.metric-cards article{display:grid;gap:9px;padding:17px;border:1px solid var(--border);border-radius:12px;background:var(--panel)}.metric-cards span,.metric-cards small{font-size:12px;color:var(--text-2);line-height:1.6}.metric-cards strong{font-size:29px;color:var(--primary)}.metric-cards i{font-size:13px;font-style:normal;margin-left:5px}.overview{display:grid;grid-template-columns:1.4fr 1fr;gap:14px}.panel{border:1px solid var(--border);border-radius:12px;background:var(--panel);padding:18px;margin:14px 0}.overview .panel{margin:0}.panel h3{font-size:15px;margin:0 0 12px}.panel p{font-size:12px;color:var(--text-2);line-height:1.7}.chart{height:175px;display:flex;gap:12px;align-items:end;margin:18px 0}.column{flex:1;text-align:center;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:end;gap:5px;min-width:0}.column>b{font-size:13px}.bar-space{height:105px;width:100%;display:flex;align-items:end;border-bottom:1px solid var(--border)}.bar{width:70%;margin:auto auto 0;background:var(--primary);border-radius:5px 5px 0 0;min-height:1px}.column>span{font-size:11px}.column small{font-size:10px;color:var(--text-3)}.column.uncovered{opacity:.45}.column.uncovered .bar{min-height:0}.change-count{display:flex;gap:10px;align-items:baseline}.change-count strong{font-size:32px;color:#bf7f24}.change-count span{font-size:12px}.changes ul{list-style:none;padding:0;font-size:12px}.changes li{display:flex;justify-content:space-between;border-top:1px solid var(--border);padding:8px 0}.baseline-items{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.baseline-items article{display:flex;justify-content:space-between;gap:12px;background:var(--bg);border-radius:7px;padding:10px;font-size:12px}.baseline-items strong,.baseline-items small{display:block;overflow-wrap:anywhere}.baseline-items small{font-size:11px;color:var(--text-3);margin-top:5px}.baseline-items span{white-space:nowrap;color:#8c672b}.baseline-items .completed{color:#288051}.estimate-summary{display:flex;gap:18px;flex-wrap:wrap;font-size:12px}.estimate-summary b{color:var(--primary)}.table-scroll{overflow:auto}table{width:100%;border-collapse:collapse;text-align:left;font-size:12px}th,td{padding:10px;border-bottom:1px solid var(--border);white-space:nowrap}th{color:var(--text-2);font-weight:500}.event{display:grid;gap:5px;font-size:12px;padding:12px 0;border-bottom:1px solid var(--border)}.event time,.event span,.event small{color:var(--text-3);overflow-wrap:anywhere}.panel summary{cursor:pointer;font-size:14px;font-weight:600}.panel button{padding:8px 11px;background:var(--primary);color:white;border-radius:7px;cursor:pointer}.error{color:#a33b28;font-size:13px}@media(max-width:950px){.metric-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.overview{grid-template-columns:1fr}.baseline-items{grid-template-columns:1fr}}
 </style>

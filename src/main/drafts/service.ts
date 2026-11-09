@@ -3,6 +3,7 @@ import { getDb } from '../db/database'
 import * as store from '../agent/store'
 import type { DraftItem, TaskDraft } from '@shared/drafts'
 import { day } from '../planning/engine'
+import {withAudit} from '../statistics/ledger'
 
 export type DraftInput = Partial<Omit<DraftItem, 'id' | 'origin'>>
 interface DraftRow { id: string; run_id: string; version: number; state: TaskDraft['state']; items_json: string; created_ids_json: string; updated_at: string }
@@ -126,6 +127,7 @@ function validateCommit(d: TaskDraft): void {
   included.forEach(i => normalizeItem(Object.fromEntries(fields.map(k => [k, i[k as keyof DraftItem]])) as DraftInput, i, i.origin))
 }
 export function commit(runId: string, id: string, expectedVersion: number): { saved: true; taskIds: number[]; sourceRef: string } {
+  return withAudit({actor:'user',source:'draft_confirmed',sourceRef:`draft:${id}`},()=>{
   return getDb().transaction(() => {
     const d = getDraft(id)
     if (d.runId !== runId || d.version !== expectedVersion) throw new Error('草案版本已变化，请重新核对卡片。')
@@ -145,6 +147,7 @@ export function commit(runId: string, id: string, expectedVersion: number): { sa
     getDb().prepare("UPDATE task_drafts SET state='committed',created_ids_json=?,updated_at=? WHERE id=? AND version=?").run(JSON.stringify(ids), now, id, expectedVersion)
     return { saved: true as const, taskIds: ids, sourceRef: d.sourceRef }
   })()
+  })
 }
 export function discard(runId: string, id: string): void {
   getDb().prepare("UPDATE task_drafts SET state='discarded',updated_at=? WHERE id=? AND run_id=? AND state='editing'").run(new Date().toISOString(), id, runId)
