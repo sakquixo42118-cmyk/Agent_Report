@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3'
-export const LATEST_SCHEMA_VERSION = 11
+export const LATEST_SCHEMA_VERSION = 12
 
 /** 简单版本迁移：user_version 存版本号，逐版本执行 DDL */
 export function runMigrations(db: Database.Database): void {
@@ -269,6 +269,36 @@ export function runMigrations(db: Database.Database): void {
         END;
       `)
       db.pragma('user_version = 11')
+    })()
+  }
+  if(version<12){
+    db.transaction(()=>{
+      db.exec(`
+        CREATE TABLE attention_settings(id INTEGER PRIMARY KEY CHECK(id=1),proactive_enabled INTEGER NOT NULL DEFAULT 1,
+          course_enabled INTEGER NOT NULL DEFAULT 1,nudge_enabled INTEGER NOT NULL DEFAULT 1,desktop_enabled INTEGER NOT NULL DEFAULT 0,
+          quiet_enabled INTEGER NOT NULL DEFAULT 1,quiet_start_min INTEGER NOT NULL DEFAULT 1320,quiet_end_min INTEGER NOT NULL DEFAULT 480,
+          interval_min INTEGER NOT NULL DEFAULT 60,daily_checks INTEGER NOT NULL DEFAULT 3,daily_messages INTEGER NOT NULL DEFAULT 3,
+          start_advance_min INTEGER NOT NULL DEFAULT 10,reminder_daily_limit INTEGER NOT NULL DEFAULT 12,version INTEGER NOT NULL DEFAULT 1);
+        INSERT INTO attention_settings(id) VALUES(1);
+        CREATE TABLE attention_state(id INTEGER PRIMARY KEY CHECK(id=1),enabled_at INTEGER NOT NULL,last_check_at INTEGER NOT NULL DEFAULT 0,last_desktop_at INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE attention_events(key TEXT PRIMARY KEY,kind TEXT NOT NULL,payload_json TEXT NOT NULL,version TEXT NOT NULL,
+          expires_at INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'new');
+        CREATE TABLE attention_jobs(id TEXT PRIMARY KEY,status TEXT NOT NULL DEFAULT 'pending',event_keys_json TEXT NOT NULL,
+          versions_json TEXT NOT NULL,settings_version INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,retry_at INTEGER NOT NULL DEFAULT 0,
+          lease_until INTEGER NOT NULL DEFAULT 0,token TEXT,created_at INTEGER NOT NULL,trace_json TEXT NOT NULL DEFAULT '[]');
+        CREATE INDEX idx_attention_jobs_status ON attention_jobs(status,retry_at);
+        CREATE TABLE attention_attempts(id INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL REFERENCES attention_jobs(id),
+          started_at INTEGER NOT NULL,day TEXT NOT NULL,outcome TEXT NOT NULL DEFAULT 'running');
+        CREATE INDEX idx_attention_attempts_day ON attention_attempts(day);
+        CREATE TABLE attention_messages(id TEXT PRIMARY KEY,source_key TEXT NOT NULL UNIQUE,kind TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,
+          state TEXT NOT NULL DEFAULT 'open',is_read INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,
+          snoozed_until INTEGER,payload_json TEXT NOT NULL,run_id TEXT,desktop_status TEXT NOT NULL DEFAULT 'pending');
+        CREATE INDEX idx_attention_messages_state ON attention_messages(state,is_read);
+        CREATE TABLE attention_mutes(subject_key TEXT PRIMARY KEY,label TEXT NOT NULL);
+        CREATE TABLE attention_desktop_batches(id TEXT PRIMARY KEY,day TEXT NOT NULL,created_at INTEGER NOT NULL,ids_json TEXT NOT NULL,status TEXT NOT NULL);
+      `)
+      db.prepare('INSERT INTO attention_state(id,enabled_at) VALUES(1,?)').run(Date.now())
+      db.pragma('user_version = 12')
     })()
   }
 }

@@ -1,10 +1,11 @@
-import { app, BrowserWindow, shell } from 'electron'
+import { app, BrowserWindow, shell, powerMonitor } from 'electron'
 import path from 'node:path'
 import { mkdirSync } from 'node:fs'
 import { registerIpcHandlers } from './ipc'
 import { closeDb } from './db/database'
 import { onAppStart } from './ai/analyzer'
 import { startWorker, stopWorker } from './feedback/worker'
+import {startAttention,stopAttention,wakeAttention} from './attention/worker'
 
 // win32 通知必设
 app.setAppUserModelId('com.personal.plan')
@@ -14,6 +15,12 @@ mkdirSync(agentDataPath, { recursive: true })
 app.setPath('userData', agentDataPath)
 
 let mainWindow: BrowserWindow | null = null
+const ownsInstance=app.requestSingleInstanceLock()
+if(!ownsInstance)app.quit()
+app.on('second-instance',()=>{
+  if(mainWindow&&!mainWindow.isDestroyed()){if(mainWindow.isMinimized())mainWindow.restore();mainWindow.show();mainWindow.focus()}
+  wakeAttention()
+})
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -35,6 +42,7 @@ function createWindow(): void {
   mainWindow.on('ready-to-show', () => {
     mainWindow?.show()
   })
+  mainWindow.on('focus',wakeAttention)
 
   // 外部链接走系统浏览器
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -50,9 +58,12 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  if(!ownsInstance)return
   registerIpcHandlers(() => mainWindow)
   createWindow()
   startWorker()
+  startAttention()
+  powerMonitor.on('resume',wakeAttention)
   // 启动钩子：恢复中断的收件箱分析 + 每日重评
   onAppStart()
   // 第二阶段只通过试排/确认保存执行块，不在启动时改写任务日期。
@@ -68,5 +79,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   stopWorker()
+  stopAttention()
   closeDb()
 })

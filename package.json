@@ -1,6 +1,6 @@
 {
   "name": "suishou-plan",
-  "version": "0.2.0-alpha.6",
+  "version": "0.2.0-alpha.7",
   "description": "随手计划 - AI 自动安排轻重缓急的个人计划工具",
   "main": "./out/main/index.js",
   "author": "personal",

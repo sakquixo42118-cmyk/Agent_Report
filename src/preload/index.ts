@@ -5,8 +5,18 @@ import { DRAFT_IPC, type TaskDraft, type DraftItem } from '../shared/drafts'
 import { PLANNING_IPC, type PlanningSnapshot, type CourseInput, type PlanningSettings, type PlanPreview, type CalendarExceptionInput, type DayOverride } from '../shared/planning'
 import { PROFILE_IPC, type MemoryFact, type MemoryInput, type DurationEstimate, type ProfileState, type CompletionDetail, type FeedbackInput } from '../shared/profile'
 import {STATISTICS_IPC,type StatisticsReport,type FrozenPlan,type PlanAuditInput} from '../shared/statistics'
+import {ATTENTION_IPC,type AttentionSettings,type AttentionState} from '../shared/attention'
 
 const api = {
+  attentionState:():Promise<AttentionState>=>ipcRenderer.invoke(ATTENTION_IPC.state),
+  attentionSettings:(input:AttentionSettings,reminders?:{enabled:boolean;advanceHours:number}):Promise<void>=>ipcRenderer.invoke(ATTENTION_IPC.settings,input,reminders),
+  attentionAction:(id:string,kind:'read'|'dismiss'|'none'|'later'|'mute',minutes?:number):Promise<void>=>ipcRenderer.invoke(ATTENTION_IPC.action,id,kind,minutes),
+  attentionUnmute:(subject:string):Promise<void>=>ipcRenderer.invoke(ATTENTION_IPC.unmute,subject),
+  attentionCheck:(retry=false):Promise<AttentionState>=>ipcRenderer.invoke(ATTENTION_IPC.check,retry),
+  attentionCapture:(id:string,input:string):Promise<AgentRun>=>ipcRenderer.invoke(ATTENTION_IPC.capture,id,input),
+  attentionDiscuss:(id:string):Promise<AgentRun>=>ipcRenderer.invoke(ATTENTION_IPC.discuss,id),
+  onAttentionChanged:(cb:()=>void):(()=>void)=>{const listener=():void=>cb();ipcRenderer.on(ATTENTION_IPC.changed,listener);return()=>ipcRenderer.removeListener(ATTENTION_IPC.changed,listener)},
+  onAttentionNavigate:(cb:(id:string)=>void):(()=>void)=>{const listener=(_e:Electron.IpcRendererEvent,id:string):void=>cb(id);ipcRenderer.on(ATTENTION_IPC.navigate,listener);return()=>ipcRenderer.removeListener(ATTENTION_IPC.navigate,listener)},
   statisticsRead:(date:string):Promise<StatisticsReport>=>ipcRenderer.invoke(STATISTICS_IPC.read,date),
   statisticsFreeze:(date:string):Promise<FrozenPlan>=>ipcRenderer.invoke(STATISTICS_IPC.freeze,date),
   captureStart: (goal:string):Promise<AgentRun>=>ipcRenderer.invoke(DRAFT_IPC.capture,goal),

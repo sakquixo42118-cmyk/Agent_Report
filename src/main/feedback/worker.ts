@@ -5,6 +5,8 @@ import { isAiConfigured } from '../ai/client'
 import { requestAgentTurn, type ModelTransport, type ModelMessage, type ToolDefinition } from '../agent/model'
 import { currentEvent, feedbackForEvent, expireMessages, EVENT_LIFETIME } from './service'
 import { searchMemory, durationEstimate } from '../memory/service'
+import {quiet,taskMuted} from '../attention/preferences'
+import {acquireBackground,releaseBackground} from '../agent/background'
 
 const MAX_MESSAGES_PER_DAY = 3, MAX_CHECKS_PER_DAY = 12
 const tools: ToolDefinition[] = [
@@ -40,7 +42,7 @@ function stillCurrent(job: Job): boolean {
   const row = getDb().prepare('SELECT status,token FROM completion_jobs WHERE event_id=?').get(job.event_id) as { status: string; token: string | null } | undefined
   const event = currentEvent(job.event_id)
   return !!row && row.status === 'running' && row.token === job.token && enabled() && !!event?.valid &&
-    Date.now()-new Date(event.createdAt).getTime()<EVENT_LIFETIME && !feedbackForEvent(job.event_id)
+    !taskMuted(event.taskId)&&!quiet()&&Date.now()-new Date(event.createdAt).getTime()<EVENT_LIFETIME && !feedbackForEvent(job.event_id)
 }
 function abandonIfStale(job: Job): boolean {
   if (stillCurrent(job)) return false
@@ -48,10 +50,12 @@ function abandonIfStale(job: Job): boolean {
   return true
 }
 export async function processNext(transport: ModelTransport = requestAgentTurn, now = Date.now()): Promise<boolean> {
-  if (stopped || active || foregroundBusy() || !enabled() || !isAiConfigured(getSettings())) return false
+  if (stopped || active || foregroundBusy() || quiet(now) || !enabled() || !isAiConfigured(getSettings())) return false
   active = true
   let job: Job | null = null
-  const controller = new AbortController(); activeController = controller
+  const controller = new AbortController()
+  if(!acquireBackground('completion',controller)){active=false;return false}
+  activeController = controller
   const timeout = setTimeout(() => controller.abort(), 70000)
   const trace: object[] = []
   try {
@@ -70,7 +74,7 @@ export async function processNext(transport: ModelTransport = requestAgentTurn, 
     if (!job) return false
     activeJob = job
     const event = currentEvent(job.event_id)
-    if (!event?.valid || feedbackForEvent(job.event_id)) {
+    if (!event?.valid || taskMuted(event.taskId) || feedbackForEvent(job.event_id)) {
       getDb().prepare("UPDATE completion_jobs SET status=?,token=NULL WHERE event_id=? AND token=?").run(event?.valid ? 'silent' : 'cancelled', job.event_id, job.token)
       return true
     }
@@ -86,6 +90,7 @@ export async function processNext(transport: ModelTransport = requestAgentTurn, 
       if (abandonIfStale(job)) return true
       trace.push({ round: turn + 1, model: getSettings().aiModel })
       const answer = await transport(getSettings(), messages, tools, controller.signal, { forceResponse })
+      if(controller.signal.aborted)throw new Error('后台已中断')
       if (abandonIfStale(job)) return true
       messages.push(answer)
       if (!answer.tool_calls?.length) { forceResponse = true; messages.push({ role: 'system', content: '请用respond结构化选择silent或ask；不要输出普通回复。' }); continue }
@@ -119,8 +124,12 @@ export async function processNext(transport: ModelTransport = requestAgentTurn, 
     }
     throw new Error('回顾达到轮数上限')
   } catch {
+    if(job&&!stopped&&controller.signal.reason==='foreground'){
+      getDb().prepare("UPDATE completion_jobs SET status='pending',attempts=attempts-1,retry_at=?,token=NULL WHERE event_id=? AND token=? AND status='running'").run(Date.now()+30000,job.event_id,job.token)
+      return false
+    }
     if (job && !stopped) getDb().prepare("UPDATE completion_jobs SET status=?,retry_at=?,token=NULL,trace_json=? WHERE event_id=? AND token=? AND status='running'")
       .run(job.attempts < 2 ? 'pending' : 'failed', Date.now() + 30000, JSON.stringify([...trace, { error: '模型回顾未完成，可稍后重试' }]), job.event_id, job.token)
     return false
-  } finally { clearTimeout(timeout); active = false; activeController = null; activeJob = null; if (!stopped) notify() }
+  } finally { clearTimeout(timeout); active = false; activeController = null; activeJob = null;releaseBackground('completion'); if (!stopped) notify() }
 }

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { reactive, ref, onMounted } from 'vue'
 import { DEFAULT_SETTINGS, type AppSettings } from '@shared/types'
+import AttentionSettingsPanel from '../components/AttentionSettingsPanel.vue'
 
 const form = reactive<AppSettings>({ ...DEFAULT_SETTINGS })
-let saved = false
+const saved = ref(false)
 
 const testing = ref(false)
 const testResult = ref<{ ok: boolean; latencyMs?: number; error?: string } | null>(null)
@@ -27,9 +28,9 @@ onMounted(async () => {
 })
 
 async function save(): Promise<void> {
-  await window.api.settingsSet({ ...form })
-  saved = true
-  setTimeout(() => (saved = false), 2000)
+  await window.api.settingsSet({aiBaseUrl:form.aiBaseUrl,aiApiKey:form.aiApiKey,aiModel:form.aiModel,lanEnabled:form.lanEnabled,lanPort:form.lanPort})
+  saved.value = true
+  setTimeout(() => (saved.value = false), 2000)
 }
 
 defineExpose({ save })
@@ -67,20 +68,7 @@ defineExpose({ save })
       <p class="tip">配置并测试通过后，新丢进来的任务会自动 AI 分析；存量任务可在任务卡上点「重试分析」。</p>
     </section>
 
-    <section class="panel">
-      <h3>截止提醒</h3>
-      <p class="tip">系统截止通知为后续功能；完成任务后的回顾只在今日显示消息，不弹窗。</p>
-      <div class="form">
-        <label class="row">
-          <input v-model="form.notifyEnabled" type="checkbox" disabled />
-          <span>临近截止时弹系统通知</span>
-        </label>
-        <label>
-          <span>提前提醒时长（小时）</span>
-          <input v-model.number="form.notifyAdvanceHours" type="number" min="1" max="72" />
-        </label>
-      </div>
-    </section>
+    <AttentionSettingsPanel />
 
     <section class="panel">
       <h3>局域网访问（手机）</h3>

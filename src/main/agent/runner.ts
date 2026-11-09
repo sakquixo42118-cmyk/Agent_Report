@@ -11,6 +11,7 @@ import * as drafts from '../drafts/service'
 import { startReviewProposal } from '../drafts/reviewBridge'
 import type { ToolResult } from './contracts'
 import type {PlanAuditInput} from '@shared/statistics'
+import {interruptBackground} from './background'
 
 const running = new Map<string, AbortController>()
 let notify: () => void = () => {}
@@ -60,19 +61,24 @@ export function startRun(goal: unknown, transport?: ModelTransport): AgentRun {
   return startSceneRun('planning',goal,transport)
 }
 export function startSceneRun(scene: string,goal: unknown,transport?: ModelTransport): AgentRun {
+  const id=prepareSceneRun(scene,goal)
+  return startPreparedRun(id,transport)
+}
+// 先在可信事务内准备Run/来源关联；提交后再启动模型，避免把网络放进事务。
+export function prepareSceneRun(scene:string,goal:unknown,source?:{ref:string;text:string}):string{
   const value = text(goal)
   getScene(scene)
   if (!isAiConfigured(getSettings())) throw new Error('请先在设置中配置支持工具调用的模型。')
   const id = store.createRun(value, [{ role: 'system', content: instructions(scene) }, { role: 'user', content: value }],scene)
-  void drive(id, transport)
+  if(scene==='capture'||source)drafts.attachSource(id,'manual',source?.text??value,source?.ref??`input:${id}`)
+  return id
+}
+export function startPreparedRun(id:string,transport?:ModelTransport):AgentRun{
+  if(store.row(id).status==='running')void drive(id,transport)
   return store.getRun(id)
 }
 export function startCapture(goal: unknown, transport?: ModelTransport): AgentRun {
-  const value = text(goal)
-  if (!isAiConfigured(getSettings())) throw new Error('请先配置模型；也可切换快速记录或人工批量预览。')
-  const id = store.createRun(value, [{ role: 'system', content: instructions('capture') }, { role: 'user', content: value }], 'capture')
-  drafts.attachSource(id, 'manual', value, `input:${id}`)
-  void drive(id, transport); return store.getRun(id)
+  return startPreparedRun(prepareSceneRun('capture',goal),transport)
 }
 export function startBatch(raw: unknown): AgentRun {
   const value = text(raw, 12000), lines = value.split(/\r?\n/).filter(l => l.trim())
@@ -171,6 +177,7 @@ export async function drive(id: string, transport: ModelTransport = requestAgent
   if (running.has(id)) return
   const controller = new AbortController()
   running.set(id, controller)
+  interruptBackground()
   const timer = setTimeout(() => controller.abort(), 120_000)
   let messages: ModelMessage[] = store.completeMessages(JSON.parse(store.row(id).messages_json))
   const context = { observed: new Map<number, string>(), runId: id }

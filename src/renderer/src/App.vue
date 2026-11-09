@@ -11,6 +11,7 @@ import StatsView from './views/StatsView.vue'
 import SettingsView from './views/SettingsView.vue'
 import MemoryView from './views/MemoryView.vue'
 import { feedbackState, startFeedbackListener } from './stores/feedback'
+import {attentionStore,startAttentionListener} from './stores/attention'
 import { openAgentRun, agentNavigation } from './stores/agentNavigation'
 import type {AgentRun} from '@shared/agent'
 
@@ -21,7 +22,10 @@ let lastOpenedRun:string|null=null
 watch(()=>agentNavigation.revision,async()=>{current.value='today';if(lastOpenedRun!==agentNavigation.runId){lastOpenedRun=agentNavigation.runId;await nextTick();if(contentPane.value)contentPane.value.scrollTop=0}})
 const contentPane = ref<HTMLElement | null>(null)
 let offFeedback: (() => void) | undefined
-onMounted(() => { offFeedback=startFeedbackListener() }); onUnmounted(() => offFeedback?.())
+let offAttention:(()=>void)|undefined
+const totalUnread=computed(()=>feedbackState.unread+(attentionStore.data?.unread??0))
+watch(()=>attentionStore.navigation,async()=>{current.value='today';await nextTick();if(contentPane.value)contentPane.value.scrollTop=0})
+onMounted(() => { offFeedback=startFeedbackListener();offAttention=startAttentionListener() }); onUnmounted(() => {offFeedback?.();offAttention?.()})
 watch(current, async () => { await nextTick(); if (contentPane.value) contentPane.value.scrollTop = 0 })
 
 const navs = [
@@ -86,10 +90,10 @@ function provideToast(): void {
         >
           <span class="nav-icon">{{ n.icon }}</span>
           <span>{{ n.label }}</span>
-          <span v-if="n.key==='today' && feedbackState.unread" class="unread-badge" :aria-label="feedbackState.unread+'条未读完成回顾'">{{ feedbackState.unread }}</span>
+          <span v-if="n.key==='today' && totalUnread" class="unread-badge" :aria-label="totalUnread+'条未读消息'">{{ totalUnread }}</span>
         </button>
       </nav>
-      <div class="sidebar-footer">v0.2 α6 · 执行回顾</div>
+      <div class="sidebar-footer">v0.2 α7 · 主动助理</div>
     </aside>
 
     <main class="main">

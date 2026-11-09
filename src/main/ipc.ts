@@ -19,6 +19,11 @@ import { DRAFT_IPC, type DraftItem } from '@shared/drafts'
 import * as drafts from './drafts/service'
 import {STATISTICS_IPC,type PlanAuditInput} from '@shared/statistics'
 import * as statistics from './statistics/service'
+import {ATTENTION_IPC,type AttentionSettings} from '@shared/attention'
+import * as attention from './attention/service'
+import {configureAttention,wakeAttention} from './attention/worker'
+import {sendAttentionDesktop} from './attention/desktop'
+import {prepareMessageRun} from './attention/bridge'
 
 /** 广播任务变化（分析完成/手机端操作后刷新所有视图） */
 export function broadcastTaskChanged(win: BrowserWindow | null): void {
@@ -29,6 +34,19 @@ export function broadcastTaskChanged(win: BrowserWindow | null): void {
 
 export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
   const changed = (): void => broadcastTaskChanged(getWin())
+  const attentionChanged=():void=>{const win=getWin();if(win&&!win.isDestroyed())win.webContents.send(ATTENTION_IPC.changed)}
+  configureAttention(attentionChanged,agent.isAgentBusy,batch=>sendAttentionDesktop(batch,getWin))
+  ipcMain.handle(ATTENTION_IPC.state,()=>attention.attentionState())
+  ipcMain.handle(ATTENTION_IPC.settings,(_e,input:AttentionSettings,reminders?:{enabled:boolean;advanceHours:number})=>{attention.savePreferences(input,reminders);attentionChanged();wakeAttention()})
+  ipcMain.handle(ATTENTION_IPC.action,(_e,id:string,kind:'read'|'dismiss'|'none'|'later'|'mute',minutes?:number)=>{attention.action(id,kind,minutes);attentionChanged()})
+  ipcMain.handle(ATTENTION_IPC.unmute,(_e,key:string)=>{attention.unmute(key);attentionChanged();wakeAttention()})
+  ipcMain.handle(ATTENTION_IPC.check,(_e,retry=false)=>{if(typeof retry!=='boolean')throw new Error('检查参数无效。');if(retry)attention.retryFailures();wakeAttention();return attention.attentionState()})
+  const fromAttention=(id:string,mode:'capture'|'planning',input?:string):ReturnType<typeof agent.startPreparedRun>=>{
+    const runId=prepareMessageRun(id,mode,input)
+    const result=agent.startPreparedRun(runId);attentionChanged();return result
+  }
+  ipcMain.handle(ATTENTION_IPC.capture,(_e,id:string,input:string)=>fromAttention(id,'capture',input))
+  ipcMain.handle(ATTENTION_IPC.discuss,(_e,id:string)=>fromAttention(id,'planning'))
   ipcMain.handle(STATISTICS_IPC.read,(_e,date:string)=>statistics.readStatistics(date))
   ipcMain.handle(STATISTICS_IPC.freeze,(_e,date:string)=>{const result=statistics.freezeDay(date);changed();return result})
   const agentChanged = (): void => { changed(); const win=getWin(); if(win&&!win.isDestroyed())win.webContents.send(AGENT_IPC.changed) }

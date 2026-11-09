@@ -34,11 +34,12 @@ export async function statisticsTests(test:Test):Promise<void>{
   const report=()=>statistics.readStatistics(date,later)
   await test('v10升级不伪造历史完成/事件，迁移重复执行保持基线数据',()=>{
     const old=new Database(':memory:');runMigrations(old)
+    old.exec('DROP TABLE attention_attempts; DROP TABLE attention_jobs; DROP TABLE attention_messages; DROP TABLE attention_events; DROP TABLE attention_desktop_batches; DROP TABLE attention_mutes; DROP TABLE attention_state; DROP TABLE attention_settings;')
     old.exec('DROP TRIGGER task_event_created; DROP TRIGGER task_event_updated; DROP TABLE day_plan_items; DROP TABLE day_plan_snapshots; DROP TABLE task_events; DROP TABLE audit_context; DROP TABLE statistics_meta;')
     // 模拟v10：移除新增列，保留一条真实旧完成事件。
     for(const column of ['stats_tracked','stats_valid','stats_day','stats_timezone','deadline_at','deadline_confirmed'])old.exec(`ALTER TABLE completion_events DROP COLUMN ${column}`)
     old.exec("INSERT INTO tasks(id,content,status,created_at,updated_at) VALUES(1,'legacy','done','2026-01-01','2026-01-01'); INSERT INTO completion_events(id,task_id,cycle,title,group_key,estimate_source,base_min,planned_min,had_plan,created_at) VALUES('old',1,1,'legacy','旧','user',30,30,0,'2026-01-01'); PRAGMA user_version=10")
-    runMigrations(old);runMigrations(old);assert.equal(old.pragma('user_version',{simple:true}),11)
+    runMigrations(old);runMigrations(old);assert.equal(old.pragma('user_version',{simple:true}),12)
     assert.equal((old.prepare('SELECT COUNT(*) AS n FROM task_events').get() as {n:number}).n,0)
     assert.equal((old.prepare('SELECT stats_tracked FROM completion_events WHERE id=?').get('old') as {stats_tracked:number}).stats_tracked,0);old.close()
   })
