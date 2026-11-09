@@ -9,7 +9,7 @@ import type { RebalanceResult } from '@shared/types'
 import { AGENT_IPC } from '@shared/agent'
 import * as agent from './agent/runner'
 import * as agentStore from './agent/store'
-import { PLANNING_IPC } from '@shared/planning'
+import { PLANNING_IPC, type CalendarExceptionInput, type DayOverride } from '@shared/planning'
 import * as planning from './planning/service'
 import { PROFILE_IPC, type MemoryInput, type FeedbackInput } from '@shared/profile'
 import * as memory from './memory/service'
@@ -54,6 +54,13 @@ export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
   ipcMain.handle(PROFILE_IPC.feedback, (_e, input: FeedbackInput, messageId?: string) => { feedback.submitFeedback(input, messageId); profileChanged(); changed() })
   ipcMain.handle(PROFILE_IPC.retry, () => { feedback.retryFailed(); wakeWorker(); profileChanged() })
   ipcMain.handle(PLANNING_IPC.read, (_e, start: string, end: string) => planning.snapshot(start, end))
+  const checkedVersion = (version: unknown): string => {if(typeof version!=='string'||!/^[a-f0-9]{64}$/.test(version))throw new Error('缺少有效设置版本，请刷新后重试。');return version}
+  ipcMain.handle(PLANNING_IPC.exceptionSave, (_e, input: CalendarExceptionInput, version: unknown) => {const id=planning.saveException(input,checkedVersion(version));changed();return id})
+  ipcMain.handle(PLANNING_IPC.exceptionDelete, (_e, id: number, version: unknown) => {planning.deleteException(id,checkedVersion(version));changed()})
+  ipcMain.handle(PLANNING_IPC.daySave, (_e, input: DayOverride, version: unknown) => {planning.saveDayOverride(input,checkedVersion(version));changed()})
+  ipcMain.handle(PLANNING_IPC.dayDelete, (_e, date: string, version: unknown) => {planning.deleteDayOverride(date,checkedVersion(version));changed()})
+  ipcMain.handle(PLANNING_IPC.dependencySave, (_e, id: number, prerequisite: number, version: unknown) => {planning.saveDependency(id,prerequisite,checkedVersion(version));changed()})
+  ipcMain.handle(PLANNING_IPC.dependencyDelete, (_e, id: number, prerequisite: number, version: unknown) => {planning.deleteDependency(id,prerequisite,checkedVersion(version));changed()})
   ipcMain.handle(PLANNING_IPC.saveCourse, (_e, input) => { planning.saveCourse(input); changed() })
   ipcMain.handle(PLANNING_IPC.deleteCourse, (_e, id: number) => { planning.deleteCourse(id); changed() })
   ipcMain.handle(PLANNING_IPC.settings, (_e, input) => { planning.saveSettings(input); changed() })

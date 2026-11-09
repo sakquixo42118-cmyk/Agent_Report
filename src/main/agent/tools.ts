@@ -24,7 +24,7 @@ const specs: Spec[] = [
   { name: 'respond', description: '向用户展示本轮完整答复。text必须自包含，其他assistant content不会展示；查到事实后须在text中回答原问题，不能只问是否要继续规划。mode=question仅在确需补充信息时等待回答，事实已足够用mode=answer结束。不能声称未提交操作已保存。', fields: {
     mode: { type: 'string', enum: ['question', 'answer'] }, text: { type: 'string', maxLength: 3000 }
   }, required: ['mode', 'text'] },
-  { name: 'get_calendar', description: '读取最多7天的课程、可安排时间窗口、每日上限和已有执行计划。日期格式YYYY-MM-DD。', fields: { startDate: { type: 'string', maxLength: 10 }, endDate: { type: 'string', maxLength: 10 } }, required: ['startDate', 'endDate'] },
+  { name: 'get_calendar', description: '读取最多7天的课程、停补课/临时占用、单日正常或轻量设置、有效容量、显式任务依赖和已有执行计划。effectiveDays是各日真实设置；日期格式YYYY-MM-DD。', fields: { startDate: { type: 'string', maxLength: 10 }, endDate: { type: 'string', maxLength: 10 } }, required: ['startDate', 'endDate'] },
   { name: 'get_free_slots', description: '计算日期范围内避开课程、已有安排和休息后的空档及每日剩余容量；空档不是已保存安排。', fields: { startDate: { type: 'string', maxLength: 10 }, endDate: { type: 'string', maxLength: 10 } }, required: ['startDate', 'endDate'] },
   { name: 'preview_plan', description: '为指定的真实未完成任务试排连续执行时段，避开课程和其他任务、不超过已确认截止。可移动所选任务尚未开始且未锁定的安排。返回试排ID、安排、未安排原因；不会写正式计划。先查询任务ID。', fields: {
     taskIds: { type: 'array', items: { type: 'integer', minimum: 1 }, minItems: 1, maxItems: 20 }, startDate: { type: 'string', maxLength: 10 }, endDate: { type: 'string', maxLength: 10 },
@@ -67,7 +67,9 @@ function view(t: Task): object {
     urgency: t.urgency, deadlineAt: t.deadlineAt, deadlineLocal: t.deadlineAt ? new Date(t.deadlineAt).toLocaleString('sv-SE') : null,
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, deadlineConfirmed: t.deadlineConfirmed, deadlineSource: t.deadlineSource,
     legacyDueAt: t.legacyDueAt, executionWindowStart: t.rangeStart, executionWindowEnd: t.rangeEnd, estimateMin: t.estimateMin, baseEstimateMin: t.baseEstimateMin,
-    estimateGroup: t.estimateGroup, estimateSource: t.estimateSource, personalEstimate: memory.durationEstimate(t), manualLocked: t.manualLocked, updatedAt: t.updatedAt }
+    estimateGroup: t.estimateGroup, estimateSource: t.estimateSource, personalEstimate: memory.durationEstimate(t),
+    prerequisites: planning.listDependencies().filter(d=>d.taskId===t.id).map(d=>({taskId:d.prerequisiteId,title:d.prerequisiteTitle,status:d.prerequisiteStatus})),
+    manualLocked: t.manualLocked, updatedAt: t.updatedAt }
 }
 export function executeTool(name: string, raw: string, context: ToolContext): ToolResult {
   const spec = specs.find(s => s.name === name)

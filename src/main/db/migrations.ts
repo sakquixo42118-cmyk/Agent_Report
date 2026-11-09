@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3'
-export const LATEST_SCHEMA_VERSION = 9
+export const LATEST_SCHEMA_VERSION = 10
 
 /** 简单版本迁移：user_version 存版本号，逐版本执行 DDL */
 export function runMigrations(db: Database.Database): void {
@@ -193,6 +193,29 @@ export function runMigrations(db: Database.Database): void {
         );
       `)
       db.pragma('user_version = 9')
+    })()
+  }
+  if (version < 10) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE calendar_exceptions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, date TEXT NOT NULL,
+          course_id INTEGER REFERENCES calendar_courses(id), name TEXT NOT NULL,
+          start_min INTEGER NOT NULL, end_min INTEGER NOT NULL,
+          UNIQUE(kind,date,course_id)
+        );
+        CREATE INDEX idx_calendar_exceptions_date ON calendar_exceptions(date);
+        CREATE TABLE day_overrides (
+          date TEXT PRIMARY KEY, mode TEXT NOT NULL, daily_max_min INTEGER,
+          start_min INTEGER, end_min INTEGER, note TEXT NOT NULL
+        );
+        CREATE TABLE task_dependencies (
+          task_id INTEGER NOT NULL REFERENCES tasks(id), prerequisite_id INTEGER NOT NULL REFERENCES tasks(id),
+          PRIMARY KEY(task_id,prerequisite_id), CHECK(task_id != prerequisite_id)
+        );
+        CREATE INDEX idx_dependencies_prerequisite ON task_dependencies(prerequisite_id);
+      `)
+      db.pragma('user_version = 10')
     })()
   }
 }

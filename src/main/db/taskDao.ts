@@ -3,6 +3,7 @@ import type { Task, TaskCreateInput, TaskFilter, TaskUpdateInput, TaskStatus, Ta
 import { localSummary, toLocalIso } from '../ai/rules'
 import { randomUUID } from 'node:crypto'
 import { scopeKey } from '../memory/service'
+import { guardTaskDependencyChange } from '../planning/constraints'
 
 /** DB 行 → Task DTO */
 interface TaskRow {
@@ -172,6 +173,7 @@ export function markAiStatus(id: number, status: AiStatus): void {
 /** 重试分析：pending 任务拉回收件箱重走完整流程 */
 export function moveBackToInbox(id: number): void {
   const db = getDb()
+  guardTaskDependencyChange(id,'inbox')
   db.prepare(`UPDATE tasks SET status = 'inbox', updated_at = ? WHERE id = ?`).run(now(), id)
 }
 
@@ -374,6 +376,7 @@ export function completeTask(id: number, done: boolean): Task | null {
       const config = db.prepare('SELECT enabled FROM profile_settings WHERE id=1').get() as { enabled: number }
       if (config.enabled) db.prepare('INSERT INTO completion_jobs(event_id) VALUES(?)').run(eventId)
     } else {
+      guardTaskDependencyChange(id,'undo')
       db.prepare("UPDATE tasks SET status='pending',completed_at=NULL,updated_at=? WHERE id=?").run(ts, id)
       invalidateCompletions(id)
     }
@@ -449,6 +452,7 @@ export function displaceTaskTo(id: number, newDueIso: string): number {
 export function deleteTask(id: number): boolean {
   const db = getDb()
   return db.transaction(() => {
+    guardTaskDependencyChange(id,'archive')
     const info = db.prepare("UPDATE tasks SET status='archived',updated_at=? WHERE id=?").run(now(), id)
     invalidateCompletions(id)
     return info.changes > 0
@@ -536,6 +540,7 @@ export function removeChainTask(id: number): boolean {
   const db = getDb()
   const task = getTaskById(id)
   if (!task || !task.projectId) return deleteTask(id)
+  guardTaskDependencyChange(id,'archive')
   db.prepare(`UPDATE tasks SET status = 'archived', updated_at = ? WHERE id = ?`).run(now(), id)
   // 收缩 order
   db.prepare(

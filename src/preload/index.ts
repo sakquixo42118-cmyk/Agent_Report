@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, type AppSettings, type Task, type TaskCreateInput, type TaskFilter, type TaskUpdateInput, type BatchCreateResult, type ChainGroup, type RebalanceResult } from '../shared/types'
 import { AGENT_IPC, type AgentRun, type RunSummary } from '../shared/agent'
 import { DRAFT_IPC, type TaskDraft, type DraftItem } from '../shared/drafts'
-import { PLANNING_IPC, type PlanningSnapshot, type CourseInput, type PlanningSettings, type PlanPreview } from '../shared/planning'
+import { PLANNING_IPC, type PlanningSnapshot, type CourseInput, type PlanningSettings, type PlanPreview, type CalendarExceptionInput, type DayOverride } from '../shared/planning'
 import { PROFILE_IPC, type MemoryFact, type MemoryInput, type DurationEstimate, type ProfileState, type CompletionDetail, type FeedbackInput } from '../shared/profile'
 
 const api = {
@@ -29,6 +29,12 @@ const api = {
   feedbackRetry: (): Promise<void> => ipcRenderer.invoke(PROFILE_IPC.retry),
   onProfileChanged: (cb: () => void): (() => void) => { const listener = (): void => cb(); ipcRenderer.on(PROFILE_IPC.changed, listener); return () => ipcRenderer.removeListener(PROFILE_IPC.changed, listener) },
   planningRead: (start: string, end: string): Promise<PlanningSnapshot> => ipcRenderer.invoke(PLANNING_IPC.read, start, end),
+  calendarExceptionSave: (input: CalendarExceptionInput, version: string): Promise<number> => ipcRenderer.invoke(PLANNING_IPC.exceptionSave,input,version),
+  calendarExceptionDelete: (id: number, version: string): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.exceptionDelete,id,version),
+  dayOverrideSave: (input: DayOverride, version: string): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.daySave,input,version),
+  dayOverrideDelete: (date: string, version: string): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.dayDelete,date,version),
+  dependencySave: (taskId: number, prerequisiteId: number, version: string): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.dependencySave,taskId,prerequisiteId,version),
+  dependencyDelete: (taskId: number, prerequisiteId: number, version: string): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.dependencyDelete,taskId,prerequisiteId,version),
   courseSave: (input: CourseInput): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.saveCourse, input),
   courseDelete: (id: number): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.deleteCourse, id),
   planningSettings: (input: PlanningSettings): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.settings, input),
