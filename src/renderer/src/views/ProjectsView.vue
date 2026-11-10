@@ -111,7 +111,7 @@ const pct = (done: number, total: number): number => (total === 0 ? 0 : Math.rou
             </div>
             <span class="pct">{{ pct(p.doneCount, p.total) }}%</span>
           </div>
-          <span v-if="hasRange(p)" class="pc-meta">在今日助理中试排执行时间</span>
+          <span v-if="hasRange(p)" class="pc-meta">在“助理”中试排执行时间</span>
           <span class="chevron" :class="{ open: expanded.has(p.projectId) }">▾</span>
         </header>
 

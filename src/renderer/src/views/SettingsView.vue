@@ -28,7 +28,7 @@ onMounted(async () => {
 })
 
 async function save(): Promise<void> {
-  await window.api.settingsSet({aiBaseUrl:form.aiBaseUrl,aiApiKey:form.aiApiKey,aiModel:form.aiModel,lanEnabled:form.lanEnabled,lanPort:form.lanPort})
+  await window.api.settingsSet({aiBaseUrl:form.aiBaseUrl,aiApiKey:form.aiApiKey,aiModel:form.aiModel,ocrModel:form.ocrModel,lanEnabled:form.lanEnabled,lanPort:form.lanPort})
   saved.value = true
   setTimeout(() => (saved.value = false), 2000)
 }
@@ -59,6 +59,7 @@ defineExpose({ save })
           <input v-model="form.aiModel" placeholder="例如 deepseek-chat" />
         </label>
       </div>
+      <label class="ocr-model">扫描件识别模型（可选）<input v-model="form.ocrModel" placeholder="支持图片输入的模型；留空沿用上面的模型" /></label>
       <div class="test-row">
         <button class="btn" :disabled="testing" @click="testAi">{{ testing ? '测试中…' : '测试连接' }}</button>
         <span v-if="testResult" class="test-result" :class="testResult.ok ? 'ok' : 'err'">
@@ -92,6 +93,7 @@ defineExpose({ save })
 </template>
 
 <style scoped>
+.ocr-model{display:grid;gap:6px;margin-top:12px;font-size:13px;color:var(--text-2)}
 .view-header {
   margin-bottom: 16px;
 }

@@ -6,6 +6,7 @@ import type { Task } from '@shared/types'
 import type { ToolDefinition } from './model'
 import { createHash } from 'node:crypto'
 import * as memory from '../memory/service'
+import { listForAgent, readForAgent } from '../study/reader'
 import { registerTool } from './registry'
 import {readStatistics} from '../statistics/service'
 import type { ToolContext, ToolResult } from './contracts'
@@ -23,8 +24,9 @@ const specs: Spec[] = [
   { name: 'propose_memory', description: '提出长期记忆草案，用户确认后保存。分组scope可为全局或课程/估时分组；单次反馈不要直接泛化。更新现有记忆时预览原值。', fields: {
     scope: { type: 'string', maxLength: 60 }, key: { type: 'string', maxLength: 60 }, value: { type: 'string', maxLength: 800 }, expiresAt: { type: 'string', maxLength: 50, description: '可选ISO有效期，空字符串表示无到期时间。' }
   }, required: ['scope', 'key', 'value'] },
-  { name: 'respond', description: '向用户展示本轮完整答复。text必须自包含，其他assistant content不会展示；查到事实后须在text中回答原问题，不能只问是否要继续规划。mode=question仅在确需补充信息时等待回答，事实已足够用mode=answer结束。不能声称未提交操作已保存。', fields: {
-    mode: { type: 'string', enum: ['question', 'answer'] }, text: { type: 'string', maxLength: 3000 }
+  { name: 'respond', description: '向用户展示本轮完整答复。text必须自包含，其他assistant content不会展示；查到事实后须在text中回答原问题，不能只问是否要继续规划。mode=question仅在确需补充信息时等待回答，可同时给出2—4个候选答复供点选；事实已足够用mode=answer结束。不能声称未提交操作已保存。', fields: {
+    mode: { type: 'string', enum: ['question', 'answer'] }, text: { type: 'string', maxLength: 3000 },
+    options: { type: 'array', items: { type: 'string', maxLength: 30 }, maxItems: 4, description: '仅mode=question时使用：2—4个互斥的短候选答复，用户可点选也可自己输入。' }
   }, required: ['mode', 'text'] },
   { name: 'get_calendar', description: '读取最多7天的课程、停补课/临时占用、单日正常或轻量设置、有效容量、显式任务依赖和已有执行计划。effectiveDays是各日真实设置；日期格式YYYY-MM-DD。', fields: { startDate: { type: 'string', maxLength: 10 }, endDate: { type: 'string', maxLength: 10 } }, required: ['startDate', 'endDate'] },
   { name: 'get_free_slots', description: '计算日期范围内避开课程、已有安排和休息后的空档及每日剩余容量；空档不是已保存安排。', fields: { startDate: { type: 'string', maxLength: 10 }, endDate: { type: 'string', maxLength: 10 } }, required: ['startDate', 'endDate'] },
@@ -40,8 +42,13 @@ const specs: Spec[] = [
   { name: 'propose_priority_change', description: '提出重要度/紧急度修改草案，必须使用刚读取的ID和updatedAt。不会立即写入；用户点击确认后应用。至少指定一种评分。',
     fields: { taskId: { type: 'integer', minimum: 1 }, importance: { type: 'integer', minimum: 1, maximum: 5 }, urgency: { type: 'integer', minimum: 1, maximum: 5 },
       expectedUpdatedAt: { type: 'string', maxLength: 60 }, reason: { type: 'string', maxLength: 200 } }, required: ['taskId', 'expectedUpdatedAt', 'reason'] },
-  { name: 'ask_user', description: '信息不足或任务指代有歧义时向用户提出一个简短问题，保存并等待回复；信息充分时不必调用。',
-    fields: { question: { type: 'string', maxLength: 500 } }, required: ['question'] },
+  { name: 'ask_user', description: '信息不足或任务指代有歧义时向用户提出一个简短问题，保存并等待回复；信息充分时不必调用。提问应给出2—4个互斥的短选项（options），用户可点选也可自己输入；只有确实无法枚举答案时才省略options。一次只问一个关键问题，能在选项里写清的细节不要留成第二个问句。',
+    fields: { question: { type: 'string', maxLength: 500 },
+      options: { type: 'array', items: { type: 'string', maxLength: 30 }, maxItems: 4, description: '可选，2—4个互斥的短候选答复（每个不超过20字），按最可能到最不可能排序。' } }, required: ['question'] },
+  { name: 'get_study_documents', description: '列出用户已添加的教材/试卷，含总页数、已识别页数与字数。分析考点或按教材安排学习前先调用；没有资料、或可读页少于总页数时如实说明，不要编造章节与页码。', fields: {}, required: [] },
+  { name: 'read_study_pages', description: '读取已解析教材的正文，按页码返回并带页标记，单次最多约12页/5000字符。先读目录页确认章节位置再按章读；返回NO_TEXT表示这些页还没识别，要让用户在界面点「识别文字」，不要假装读过。',
+    fields: { docId: { type: 'string', maxLength: 64, description: 'get_study_documents 返回的真实 docId。' },
+      fromPage: { type: 'integer', minimum: 1, maximum: 5000 }, toPage: { type: 'integer', minimum: 1, maximum: 5000 } }, required: ['docId', 'fromPage', 'toPage'] },
   { name: 'finish_reply', description: '本轮信息已充分时，以简短答复结束；不可用于提出需要用户回答的问题，不可声称尚未确认的操作已执行。',
     fields: { text: { type: 'string', maxLength: 3000 } }, required: ['text'] }
 ]
@@ -54,6 +61,12 @@ for (const definition of toolDefinitions) registerTool({ definition,
   execute: (args, context) => executeTool(definition.function.name, JSON.stringify(args), context) })
 
 function fail(errorCode: string, message: string): ToolResult { return { ok: false, errorCode, message } }
+/** 只有 2 条以上才值得渲染成按钮；1 条或空视为普通文字提问，退回输入框作答 */
+function choices(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const list = [...new Set(value.map(v => String(v).trim()).filter(Boolean))]
+  return list.length >= 2 ? list.slice(0, 4) : []
+}
 function readableTimes(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(readableTimes)
   if (!value || typeof value !== 'object') return value
@@ -84,7 +97,19 @@ export function executeTool(name: string, raw: string, context: ToolContext): To
     const field = spec.fields[key]
     if (field.type === 'string' && (typeof value !== 'string' || value.length > (field.maxLength ?? 500) || (field.enum && !field.enum.includes(value)))) return fail('INVALID_ARGUMENTS', `${key}不是允许的字符串。`)
     if (field.type === 'integer' && (typeof value !== 'number' || !Number.isSafeInteger(value) || value < (field.minimum ?? 0) || value > (field.maximum ?? Number.MAX_SAFE_INTEGER))) return fail('INVALID_ARGUMENTS', `${key}不是范围内整数。`)
-    if (field.type === 'array' && (!Array.isArray(value) || value.length < 1 || value.length > 20 || value.some(v => !Number.isSafeInteger(v) || v < 1) || new Set(value).size !== value.length)) return fail('INVALID_ARGUMENTS', `${key}必须是1—20个不同的任务编号。`)
+    if (field.type === 'array') {
+      const items = (field.items ?? {}) as { type?: string; maxLength?: number }
+      const min = field.minItems ?? 1, max = field.maxItems ?? 20
+      if (!Array.isArray(value) || value.length < min || value.length > max) return fail('INVALID_ARGUMENTS', `${key}必须是${min}—${max}项。`)
+      if (items.type === 'string') {
+        const limit = items.maxLength ?? 200
+        const list = value as unknown[]
+        if (list.some(v => typeof v !== 'string' || !v.trim() || (v as string).length > limit)) return fail('INVALID_ARGUMENTS', `${key}的每一项都必须是1—${limit}字的非空文本。`)
+        if (new Set(list.map(v => (v as string).trim())).size !== list.length) return fail('INVALID_ARGUMENTS', `${key}不能包含重复的选项。`)
+      } else if (value.some(v => !Number.isSafeInteger(v) || (v as number) < 1) || new Set(value).size !== value.length) {
+        return fail('INVALID_ARGUMENTS', `${key}必须是互不重复的正整数编号。`)
+      }
+    }
     if (spec.required.includes(key) && typeof value === 'string' && !value.trim()) return fail('INVALID_ARGUMENTS', `${key}不能为空。`)
   }
   try {
@@ -107,6 +132,8 @@ export function executeTool(name: string, raw: string, context: ToolContext): To
       const before = memory.findFact(fact.scope, fact.key)
       return { ok: true, data: { fact, before, saved: false }, pause: 'awaiting_confirmation', pending: { type: 'memory', fact, before, expectedVersion: before?.version ?? null } }
     }
+    if (name === 'get_study_documents') return { ok: true, data: { documents: listForAgent() } }
+    if (name === 'read_study_pages') return readForAgent(String(args.docId), Number(args.fromPage), Number(args.toPage))
     if (name === 'get_calendar') return { ok: true, data: readableTimes(planning.snapshot(String(args.startDate), String(args.endDate))) }
     if (name === 'get_free_slots') return { ok: true, data: readableTimes(planning.getFree(String(args.startDate), String(args.endDate))) }
     if (name === 'preview_plan') {
@@ -131,9 +158,9 @@ export function executeTool(name: string, raw: string, context: ToolContext): To
     selected.forEach(t => context.observed.set(t.id, t.updatedAt))
     return { ok: true, data: { tasks: selected.map(view), totalMatches: list.length, truncated: selected.length < list.length } }
   }
-  if (name === 'ask_user') return { ok: true, data: { question: args.question }, pause: 'waiting_user' }
+  if (name === 'ask_user') return { ok: true, data: { question: args.question, options: choices(args.options) }, pause: 'waiting_user' }
   if (name === 'finish_reply') return { ok: true, data: { text: args.text }, pause: 'completed' }
-  if (name === 'respond') return { ok: true, data: args.mode === 'question' ? { question: args.text } : { text: args.text }, pause: args.mode === 'question' ? 'waiting_user' : 'completed' }
+  if (name === 'respond') return { ok: true, data: args.mode === 'question' ? { question: args.text, options: choices(args.options) } : { text: args.text }, pause: args.mode === 'question' ? 'waiting_user' : 'completed' }
   const task = tasks.getTaskById(Number(args.taskId))
   if (!task || task.status === 'archived') return fail('NOT_FOUND', '该任务不存在或已归档。')
   if (name === 'get_task') { context.observed.set(task.id, task.updatedAt); return { ok: true, data: view(task) } }

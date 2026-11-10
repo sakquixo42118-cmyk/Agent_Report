@@ -1,6 +1,6 @@
 {
   "name": "suishou-plan",
-  "version": "0.2.0-alpha.7",
+  "version": "0.2.0-alpha.8",
   "description": "随手计划 - AI 自动安排轻重缓急的个人计划工具",
   "main": "./out/main/index.js",
   "author": "personal",
@@ -15,7 +15,10 @@
     "dist": "electron-vite build && electron-builder --win nsis"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^1.1.0",
     "better-sqlite3": "^11.5.0",
+    "mammoth": "^1.13.0",
+    "pdfjs-dist": "^6.5.438",
     "qrcode": "^1.5.4",
     "vue": "^3.5.44"
   },

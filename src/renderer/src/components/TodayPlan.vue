@@ -23,7 +23,7 @@ onUnmounted(() => { unsubscribe?.(); if (timer) clearInterval(timer) })
         <time>{{ time(b.start) }}—{{ time(b.end) }}</time><strong>{{ b.title }}</strong><span>{{ b.kind === 'course' ? '课程 / 固定占用' : b.kind==='busy' ? '临时占用' : b.locked ? '已锁定执行时段' : '执行时段' }}</span>
       </article>
     </div>
-    <p v-else>今天还没有课程或执行安排。到“日程”录入课表，或让今日助理试排任务。</p>
+    <p v-else>今天还没有课程或执行安排。到“日程”录入课表并挑空档，或让“助理”试排。</p>
   </section>
 </template>
 <style scoped>

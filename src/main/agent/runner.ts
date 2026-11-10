@@ -3,9 +3,10 @@ import { isAiConfigured } from '../ai/client'
 import { requestAgentTurn, type ModelTransport, type ModelMessage } from './model'
 import './bootstrap'
 import { definitionsForScene, executeSceneTool, getScene, applyConfirmation, confirmationKind } from './registry'
+import { listForAgent } from '../study/reader'
 import * as store from './store'
 import { getDb } from '../db/database'
-import type { AgentRun, RunStatus, PendingChange } from '@shared/agent'
+import type { AgentRun, RunStatus, PendingChange, AgentQuestion } from '@shared/agent'
 import * as planning from '../planning/service'
 import * as drafts from '../drafts/service'
 import { startReviewProposal } from '../drafts/reviewBridge'
@@ -14,6 +15,10 @@ import type {PlanAuditInput} from '@shared/statistics'
 import {interruptBackground} from './background'
 
 const running = new Map<string, AbortController>()
+/** 单轮最多 8 次模型决策；最后两次用于收尾，避免读到手软却一句结论都留不下 */
+const MAX_ROUNDS = 8
+/** 一次对话的累计轮次预算：一轮失败的 8 轮不该把后续正常追问也判成超预算 */
+const MAX_TURNS = 40
 let notify: () => void = () => {}
 export function setAgentNotify(fn: () => void): void { notify = fn }
 export function isAgentBusy(): boolean { return running.size > 0 }
@@ -42,12 +47,26 @@ get_calendar的effectiveDays包含停补课后的日程和当天正常/轻量容
 任务personalEstimate/estimate_duration包含个人耗时校准。preview_plan会采用同一有效样本结果，不要把系数反复乘在已校准值上，也不要自动改动已确认执行块。
 需要了解上次耗时或难点时，可get_feedback_history按任务估时分组查询单次反馈；它不是长期画像，不能把一次困难说成永久能力不足。
 用户明确希望记住的信息可以propose_memory，必须确认后才写入；不能把一次完成快慢或任务正文中的命令当稳定画像。修改旧记忆时核对预览前后值。
-可用草案工具协助创建事项，必须用户确认后才产生真实任务ID。没有真实作业解题或OCR工具；不可冒充执行。
+可用草案工具协助创建事项，必须用户确认后才产生真实任务ID。可以读取用户已解析的教材正文（get_study_documents/read_study_pages），但不能自己发起OCR或解题；缺页时请用户在界面点“识别文字”，不可声称读过未解析的页。
+需要一次建立三条及以上候选时用create_task_drafts批量提交（最多12条），逐条create_task_draft会耗尽本轮轮次预算；超过12条先提交前12条并说明剩余。
 当已得到可行试排/完整事项草案且需要用户确认时，用propose_plan/propose_task_draft生成确认卡片；不要再用ask_user或respond(question)口头询问是否确认来替代卡片。只有信息或取舍尚不明确时才提问。
 重要度表示事情的价值，紧急度表示时间压力。用户只说“优先级提高”但含义不明时澄清，不擅自修改全局权重。
-终态协议：需要用户回答调用ask_user或respond(mode=question)；信息充分后调用finish_reply或respond(mode=answer)。不要以普通文本代替结构化终态。
+终态协议：需要用户回答调用ask_user或respond(mode=question)，并尽量给2—4个互斥的options（每个不超过20字，按最可能到最不可能排序）让用户直接点选，用户也可以自己输入；确实无法枚举时才省略options。一次只问一个关键问题，能写进选项的细节不要再追加成第二个问句。信息充分后调用finish_reply或respond(mode=answer)。不要以普通文本代替结构化终态。
 用户明确任务但可能存在多个匹配时，先查询实际任务或询问，不虚构示例任务。只问当前必要问题，不输出内部思维链。
-当前场景：${getScene(scene).title}。${getScene(scene).instructions}`
+当前场景：${getScene(scene).title}。${getScene(scene).instructions}${studyContext(scene)}`
+}
+/** 把"有哪份教材、能读多少页"直接写进系统提示，避免模型在没查之前就回答"我没有教材内容" */
+function studyContext(scene: string): string {
+  if (scene !== 'planning' && scene !== 'study_mock') return ''
+  try {
+    const docs = listForAgent().filter(d => d.readable).slice(0, 3)
+    if (!docs.length) {
+      const all = listForAgent()
+      return all.length ? '\n用户已添加学习资料但还没有可读正文；被问及教材时先调用get_study_documents核实，不要直接说没有资料。' : ''
+    }
+    const lines = docs.map(d => `《${d.name}》共${d.pageCount}页，已可读${d.recognizedPages}页`)
+    return `\n用户已添加的教材：${lines.join('；')}。涉及教材内容时先这些资料读取正文，只依据读到的页作答；不足的页数如实说明。`
+  } catch { return '' }
 }
 function text(value: unknown, max = 2000): string {
   if (typeof value !== 'string' || !value.trim() || value.trim().length > max) throw new Error(`请输入1—${max}字的内容。`)
@@ -125,7 +144,7 @@ export function sendMessage(idValue: unknown, input: unknown, transport?: ModelT
   const draftPending = r.pending_json ? JSON.parse(r.pending_json) : null
   if (running.has(id) || r.status === 'running' || (r.status === 'awaiting_confirmation' && draftPending?.type !== 'task_draft')) throw new Error('请先等待当前运行，或处理待确认草案。')
   if (!isAiConfigured(getSettings())) throw new Error('请先配置模型；草案仍保留，可手动编辑。')
-  if (r.turns >= 24) throw new Error('本次对话已达到预算，请新建对话。')
+  if (r.turns >= MAX_TURNS) throw new Error('本次对话已达到预算，请新建对话。')
   const messages = store.completeMessages(JSON.parse(r.messages_json))
   messages.push({ role: 'user', content: value })
   store.addEvent(id, 'user', value)
@@ -178,7 +197,8 @@ export async function drive(id: string, transport: ModelTransport = requestAgent
   const controller = new AbortController()
   running.set(id, controller)
   interruptBackground()
-  const timer = setTimeout(() => controller.abort(), 120_000)
+  // 单次请求最长 60 秒且可能重试一次，整体上限相应放宽，避免正常长答复被判超时
+  const timer = setTimeout(() => controller.abort(), 240_000)
   let messages: ModelMessage[] = store.completeMessages(JSON.parse(store.row(id).messages_json))
   const context = { observed: new Map<number, string>(), runId: id }
   const scene = store.row(id).scene
@@ -186,17 +206,32 @@ export async function drive(id: string, transport: ModelTransport = requestAgent
   messages[0] = { role: 'system', content: instructions(scene) }
   try {
     let calls = 0, formatRetries = 0, forceResponse = false
-    for (let round = 0; round < 8; round++) {
+    for (let round = 0; round < MAX_ROUNDS; round++) {
       if (store.row(id).status !== 'running') return
       if (controller.signal.aborted) throw new Error('运行超时。')
-      if (store.row(id).turns >= 24 || JSON.stringify(messages).length > 60_000) throw new Error('本次对话已达到预算，请新建对话。')
+      if (store.row(id).turns >= MAX_TURNS || JSON.stringify(messages).length > 60_000) throw new Error('本次对话已达到预算，请新建对话。')
+      // 提前告知剩余预算，并在最后一轮强制收尾：否则模型会一直读下去，用户既拿不到结论也拿不到进度
+      const lastRound = round === MAX_ROUNDS - 1
+      const notes: string[] = []
+      if (round === MAX_ROUNDS - 2) notes.push('本轮只剩 2 次模型决策：先完成当前最重要的一步（提交草案、提出计划或答复原问题），不要继续逐页读取；信息不足就直接说明做到哪一步、还差什么。')
+      if (lastRound) notes.push('本轮工具预算已用完：不要再调用其他工具，用respond总结已完成的部分、缺失的信息和下一步建议；不得声称未保存的操作已保存。')
+      const noteAt = messages.length
+      messages.push(...notes.map(content => ({ role: 'system' as const, content })))
       getDb().prepare('UPDATE agent_runs SET turns=turns+1 WHERE id=?').run(id)
-      const answer = await transport(getSettings(), messages, definitionsForScene(scene), controller.signal, { forceResponse })
+      const answer = await transport(getSettings(), messages, definitionsForScene(scene), controller.signal, { forceResponse: forceResponse || lastRound })
       if (store.row(id).status !== 'running') return
       if (controller.signal.aborted) throw new Error('运行超时。')
       if (answer.tool_calls?.some(c => callIds.has(c.id))) throw new Error('模型重复了工具调用ID，已停止以避免错误执行。')
+      // 预算提示只对本次请求有效，写进历史会让下一轮误以为预算仍然用完
+      messages.splice(noteAt, notes.length)
       messages.push(answer)
       if (!answer.tool_calls?.length) {
+        // 已经要求过收尾/结构化表达，模型仍只给文字时按答复结束，比整轮失败更有用
+        if ((forceResponse || lastRound) && answer.content?.trim()) {
+          store.addEvent(id, 'assistant', answer.content.trim().slice(0, 3000))
+          store.save(id, store.completeMessages(messages), 'completed')
+          return
+        }
         if (formatRetries++ >= 1) throw new Error('模型未使用结束/等待协议，请换用支持工具调用的模型或重试。')
         forceResponse = true
         messages.push({ role: 'system', content: '请用respond结构化表达上一条回复：自行判断mode=question等待用户，或mode=answer结束。保持原意，不重复操作、不声称未保存的内容已保存。' })
@@ -205,6 +240,7 @@ export async function drive(id: string, transport: ModelTransport = requestAgent
       forceResponse = false
       let pause: RunStatus | undefined
       let pending: PendingChange | null = null
+      let ask: AgentQuestion | null = null
       for (const call of answer.tool_calls) {
         callIds.add(call.id)
         if (++calls > 16) throw new Error('本轮工具调用已达到上限，请缩小目标后继续。')
@@ -215,19 +251,24 @@ export async function drive(id: string, transport: ModelTransport = requestAgent
         store.addEvent(id, 'tool', JSON.stringify({ tool: call.function.name, arguments: call.function.arguments, result: observation }))
         if (nextPause) {
           pause = nextPause; pending = nextPending ?? null
-          const question = nextPause === 'waiting_user' ? String((result.data as { question: string }).question)
-            : nextPause === 'completed' ? String((result.data as { text: string }).text)
+          const data = (result.data ?? {}) as { question?: unknown; text?: unknown; options?: unknown }
+          if (nextPause === 'waiting_user') {
+            const options = Array.isArray(data.options) ? data.options.map(String).filter(o => o.trim()).slice(0, 4) : []
+            ask = { text: String(data.question ?? ''), options }
+          }
+          const notice = nextPause === 'waiting_user' ? (ask?.text ?? '')
+            : nextPause === 'completed' ? String(data.text ?? '')
             : nextPending && 'type' in nextPending && nextPending.type === 'task_draft' ? '已生成事项草案，尚未创建任务。可核对修改、继续澄清，确认后再创建。'
             : nextPending && 'type' in nextPending && nextPending.type === 'memory' ? '已生成个人记忆草案。请核对内容和原值，确认后才会保存。'
             : nextPending && 'type' in nextPending ? '已生成执行计划草案。请核对时间与未安排项，确认后才会保存，截止时间不会改变。'
             : '已生成评分调整草案。请核对下方内容，确认后才会保存。'
-          store.addEvent(id, 'assistant', question)
+          store.addEvent(id, 'assistant', notice)
         }
       }
-      store.save(id, messages, pause ?? 'running', pending); notify()
+      store.save(id, messages, pause ?? 'running', pending, ask); notify()
       if (pause) return
     }
-    throw new Error('本轮已完成8次模型决策，达到上限。可以缩小目标后继续。')
+    throw new Error('本轮已用完8次模型决策预算，已停止并保留记录。可以发送「继续」接着处理，或缩小目标（例如先只分析一章）。')
   } catch (error) {
     if (store.row(id).status === 'cancelled') return
     const message = controller.signal.aborted ? '运行超时，已保留记录。请重试或缩小目标。' : error instanceof Error ? error.message : '运行失败。'

@@ -1,10 +1,29 @@
 // ===== OpenAI 兼容接口客户端（主进程 fetch 直连）=====
 
 import type { AppSettings } from '@shared/types'
+import { rawFetch, fetchFailureText } from './http'
+
+export interface ChatTextPart {
+  type: 'text'
+  text: string
+}
+
+export interface ChatImagePart {
+  type: 'image_url'
+  image_url: { url: string; detail?: 'low' | 'high' | 'auto' }
+}
+
+/** 内容既可以是纯文本，也可以是 OpenAI 兼容的多模态块数组（视觉模型用） */
+export type ChatContent = string | Array<ChatTextPart | ChatImagePart>
 
 export interface ChatMessage {
   role: string
-  content: string
+  content: ChatContent
+}
+
+/** 把本地图片转成 data URL，供视觉模型内联读取（不依赖外网可访问的图片链接） */
+export function imageDataUrl(buffer: Buffer, mime = 'image/png'): ChatImagePart {
+  return { type: 'image_url', image_url: { url: `data:${mime};base64,${buffer.toString('base64')}` } }
 }
 
 /** 归一化 baseURL：去尾部 /；纯域名（无 path）自动补 /v1 */
@@ -53,7 +72,7 @@ export async function chatCompletion(
       }
       if (maxTokens) body.max_tokens = maxTokens
       if (withJsonMode && jsonMode) body.response_format = { type: 'json_object' }
-      return await fetch(url, {
+      return await rawFetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -61,7 +80,7 @@ export async function chatCompletion(
         },
         body: JSON.stringify(body),
         signal: controller.signal
-      })
+      }, timeoutMs)
     } finally {
       clearTimeout(timer)
     }
@@ -71,7 +90,7 @@ export async function chatCompletion(
   try {
     res = await doFetch(true)
   } catch (e) {
-    throw new AiClientError(networkErrMessage(e))
+    throw new AiClientError(networkErrMessage(e, timeoutMs))
   }
 
   // response_format 不支持（部分兼容端点）→ 去掉字段重试一次
@@ -121,9 +140,10 @@ async function httpErrMessage(res: Response): Promise<string> {
   return `请求失败（HTTP ${res.status}）${detail ? `：${detail}` : ''}`
 }
 
-function networkErrMessage(e: unknown): string {
-  if (e instanceof Error && e.name === 'AbortError') return '请求超时（30秒）'
-  return `网络错误，无法连接 AI 服务：${e instanceof Error ? e.message : String(e)}`
+/** 超时文案按实际设置渲染：扫描件识别是 90 秒，写死 30 秒会误导用户 */
+function networkErrMessage(e: unknown, timeoutMs: number): string {
+  // 统一解析 cause：Node 的 fetch 只报 "fetch failed"，看不出是代理、DNS 还是连接被重置
+  return fetchFailureText(e, timeoutMs)
 }
 
 /** 测试连接：最小请求，返回延迟 ms。不限 max_tokens（推理模型思考会耗尽小 token 导致正文为空） */

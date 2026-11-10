@@ -39,7 +39,7 @@ export async function statisticsTests(test:Test):Promise<void>{
     // 模拟v10：移除新增列，保留一条真实旧完成事件。
     for(const column of ['stats_tracked','stats_valid','stats_day','stats_timezone','deadline_at','deadline_confirmed'])old.exec(`ALTER TABLE completion_events DROP COLUMN ${column}`)
     old.exec("INSERT INTO tasks(id,content,status,created_at,updated_at) VALUES(1,'legacy','done','2026-01-01','2026-01-01'); INSERT INTO completion_events(id,task_id,cycle,title,group_key,estimate_source,base_min,planned_min,had_plan,created_at) VALUES('old',1,1,'legacy','旧','user',30,30,0,'2026-01-01'); PRAGMA user_version=10")
-    runMigrations(old);runMigrations(old);assert.equal(old.pragma('user_version',{simple:true}),12)
+    runMigrations(old);runMigrations(old);assert.equal(old.pragma('user_version',{simple:true}),15)
     assert.equal((old.prepare('SELECT COUNT(*) AS n FROM task_events').get() as {n:number}).n,0)
     assert.equal((old.prepare('SELECT stats_tracked FROM completion_events WHERE id=?').get('old') as {stats_tracked:number}).stats_tracked,0);old.close()
   })

@@ -13,10 +13,13 @@ import { executeTool } from '../src/main/agent/tools'
 import { computeScore, isOverdue } from '../src/shared/priority'
 import { extractDueDate } from '../src/main/ai/rules'
 import type { ModelMessage, ModelTransport } from '../src/main/agent/model'
+import { normalizeModelMessage } from '../src/main/agent/model'
+import { fetchFailureText, isRetryableFetchError } from '../src/main/ai/http'
 import { planningTests } from './planning.test'
 import * as planning from '../src/main/planning/service'
 import { dateKey, at } from '../src/main/planning/engine'
 import { profileTests } from './profile.test'
+import { studyTests } from './study.test'
 import * as memory from '../src/main/memory/service'
 import * as feedback from '../src/main/feedback/service'
 import { processNext } from '../src/main/feedback/worker'
@@ -25,10 +28,12 @@ import { constraintsTests } from './constraints.test'
 import { statisticsTests } from './statistics.test'
 import * as statistics from '../src/main/statistics/service'
 import {attentionTests} from './attention.test'
+import {integrationTests} from './integration.test'
 import * as attention from '../src/main/attention/service'
 import {startAttention,stopAttention,processAttention} from '../src/main/attention/worker'
 import * as drafts from '../src/main/drafts/service'
 import { registerReviewProvider, startReviewProposal } from '../src/main/drafts/reviewBridge'
+import { groupChatEvents, toolSummary } from '../src/renderer/src/lib/chatEvents'
 
 app.setPath('userData', mkdtempSync(join(tmpdir(), 'suishou-agent-tests-')))
 let passed = 0
@@ -53,7 +58,7 @@ app.whenReady().then(async () => {
     // 测试不依赖运行机器当前是否为安静时段；安静规则在主动消息专项中单独验证。
     getDb().prepare('UPDATE attention_settings SET quiet_enabled=0 WHERE id=1').run()
     const taskId = seed('测试报告'), otherId = seed('另一份报告')
-    await test('迁移至v12且重复执行不破坏数据', () => { runMigrations(getDb()); assert.equal(getDb().pragma('user_version', { simple: true }), 12); assert.ok(tasks.getTaskById(taskId)) })
+    await test('迁移至统一v15且重复执行不破坏数据', () => { runMigrations(getDb()); assert.equal(getDb().pragma('user_version', { simple: true }), 15); assert.ok(tasks.getTaskById(taskId)) })
     await test('带截止的过期判定不抛异常', () => { assert.equal(isOverdue({ dueAt: '2026-01-01T12:00:00' }, new Date('2026-01-02').getTime()), true); assert.equal(isOverdue({ dueAt: null }), false); assert.ok(Number.isFinite(computeScore(tasks.getTaskById(taskId)!))) })
     await test('明天下午与分钟日期解析', () => { const now = new Date(2026, 10, 5, 10); assert.equal(extractDueDate('明天下午3:30交报告', now), '2026-11-06T15:30:00'); assert.equal(extractDueDate('明天27:00', now), null) })
     await test('自动重评不锁定、人工修改锁定', () => { tasks.updateTask({ id: taskId, importance: 4 }, 'review'); assert.equal(tasks.getTaskById(taskId)!.manualLocked, false); tasks.updateTask({ id: otherId, importance: 4 }); assert.equal(tasks.getTaskById(otherId)!.manualLocked, true) })
@@ -153,9 +158,54 @@ app.whenReady().then(async () => {
       for (let i = 0; i < 100 && store.getRun(run).status === 'running'; i++) await new Promise(r => setTimeout(r, 2))
       assert.equal(receivedAnswer, true); assert.equal(store.getRun(run).status, 'completed')
     })
+    await test('提问带候选答复时保存选项，回复后选项失效', async () => {
+      const run = create('选项测试')
+      await drive(run, async () => call('ask_user', { question: '这次考整本还是部分章节？', options: ['整本五章', '只考前四章'] }))
+      const waiting = store.getRun(run)
+      assert.equal(waiting.status, 'waiting_user')
+      assert.deepEqual(waiting.question, { text: '这次考整本还是部分章节？', options: ['整本五章', '只考前四章'] })
+      sendMessage(run, '整本五章', async () => call('finish_reply', { text: '收到。' }))
+      for (let i = 0; i < 100 && store.getRun(run).status === 'running'; i++) await new Promise(r => setTimeout(r, 2))
+      assert.equal(store.getRun(run).question, null, '回复后旧选项必须失效，避免点到过期按钮')
+    })
+    await test('不足两条候选退回自由输入，重复或超量选项被拒绝', () => {
+      const ctx = { observed: new Map<number, string>() }
+      assert.deepEqual(executeTool('ask_user', JSON.stringify({ question: '确认吗？', options: ['是'] }), ctx).data, { question: '确认吗？', options: [] })
+      assert.deepEqual(executeTool('ask_user', JSON.stringify({ question: '确认吗？' }), ctx).data, { question: '确认吗？', options: [] })
+      assert.equal(executeTool('ask_user', JSON.stringify({ question: '确认吗？', options: ['是', '是'] }), ctx).errorCode, 'INVALID_ARGUMENTS')
+      assert.equal(executeTool('ask_user', JSON.stringify({ question: '确认吗？', options: ['是', ' '] }), ctx).errorCode, 'INVALID_ARGUMENTS')
+      assert.equal(executeTool('ask_user', JSON.stringify({ question: '确认吗？', options: ['甲', '乙', '丙', '丁', '戊'] }), ctx).errorCode, 'INVALID_ARGUMENTS')
+      assert.deepEqual(executeTool('respond', JSON.stringify({ mode: 'question', text: '选哪个？', options: ['甲', '乙'] }), ctx).data, { question: '选哪个？', options: ['甲', '乙'] })
+    })
+    await test('连续工具记录合并成一条，答复不被工具流水挤出视野', () => {
+      const at = '' as const
+      const events = [
+        { id: 1, kind: 'user' as const, text: '分析教材', createdAt: at },
+        { id: 2, kind: 'tool' as const, text: JSON.stringify({ tool: 'get_study_documents' }), createdAt: at },
+        { id: 3, kind: 'tool' as const, text: JSON.stringify({ tool: 'read_study_pages' }), createdAt: at },
+        { id: 4, kind: 'tool' as const, text: JSON.stringify({ tool: 'read_study_pages' }), createdAt: at },
+        { id: 5, kind: 'assistant' as const, text: '已整理出三章重点', createdAt: at },
+        { id: 6, kind: 'tool' as const, text: JSON.stringify({ tool: 'list_tasks' }), createdAt: at }
+      ]
+      const rows = groupChatEvents(events)
+      assert.deepEqual(rows.map(r => r.tools.length), [0, 3, 0, 1])
+      assert.equal(toolSummary(rows[1].tools), '查看工具执行记录（3 次：get_study_documents、read_study_pages）')
+      assert.equal(toolSummary(rows[3].tools), '查看工具执行记录（list_tasks）')
+    })
     await test('连续工具调用达到预算后停止', async () => {
       const run = create(); await drive(run, async () => call('list_tasks', { limit: 1 }))
       assert.equal(store.getRun(run).status, 'failed'); assert.ok(store.getRun(run).events.some(e => e.text.includes('8次')))
+    })
+    await test('轮次用完前强制收尾，模型只给文字时按答复结束并保留记录', async () => {
+      const run = create('收尾测试')
+      await drive(run, async (_s, _m, _t, _s2, control) => control?.forceResponse
+        ? { role: 'assistant', content: '已读到第12页并整理出两章重点，其余页需要识别文字后继续。' }
+        : call('list_tasks', { limit: 1 }))
+      const saved = store.getRun(run)
+      assert.equal(saved.status, 'completed')
+      assert.ok(saved.events.some(e => e.kind === 'assistant' && e.text.includes('第12页')), '用户必须拿到已完成的进度而不是一条报错')
+      const stored = JSON.parse(store.row(run).messages_json) as { role: string; content: string | null }[]
+      assert.equal(stored.some(m => m.content?.includes('工具预算已用完')), false, '预算提示不能写进历史，否则下一轮会误以为预算仍然用完')
     })
     await test('普通文本结束会要求模型纠正为结构化等待动作', async () => {
       const run = create(); let round = 0
@@ -177,12 +227,69 @@ app.whenReady().then(async () => {
       const run = create('恢复测试'); store.save(run, [{ role: 'system', content: '' }, { role: 'user', content: '恢复测试' }, call('get_task', { taskId })], 'running')
       store.recoverInterruptedRuns(); assert.equal(store.getRun(run).status, 'failed'); assert.equal(JSON.parse(store.row(run).messages_json).length, 2)
     })
+    // ===== 模型响应归一化：可修复的差异不应让整轮对话失败 =====
+    await test('并行工具调用超过四个仍被接受', () => {
+      const calls = Array.from({ length: 6 }, (_, i) => ({ id: `c${i}`, type: 'function', function: { name: 'list_tasks', arguments: '{}' } }))
+      const answer = normalizeModelMessage({ content: null, tool_calls: calls })
+      assert.equal(answer?.tool_calls?.length, 6, '整份计划需要成批建条目，不能按调用个数判非法')
+    })
+    await test('对象形式参数、缺失或重复ID、非法条目都被归一化', () => {
+      const answer = normalizeModelMessage({ content: null, tool_calls: [
+        { type: 'function', function: { name: 'list_tasks', arguments: { status: 'all' } } },
+        { id: 'same', type: 'function', function: { name: 'list_tasks', arguments: '{}' } },
+        { id: 'same', type: 'function', function: { name: 'get_task', arguments: '{"taskId":1}' } },
+        { id: 'bad', type: 'function', function: { arguments: '{}' } },
+        'not-a-call',
+        { id: 'single', type: 'function', function: { name: 'respond', arguments: null } }
+      ] })
+      const calls = answer?.tool_calls ?? []
+      assert.equal(calls.length, 4)
+      assert.equal(calls[0].function.arguments, '{"status":"all"}')
+      assert.equal(new Set(calls.map(c => c.id)).size, 4, 'ID必须唯一，否则tool消息对不上')
+      assert.deepEqual(calls[3].function.arguments, '{}')
+    })
+    await test('整个响应不可用时给出可定位的原因，而不是笼统报错', () => {
+      assert.equal(normalizeModelMessage({ content: null, tool_calls: [] }), null)
+      assert.equal(normalizeModelMessage({ content: null, tool_calls: [{ function: {} }] }), null)
+      assert.equal(normalizeModelMessage({ content: '只有文字' })?.content, '只有文字')
+      assert.equal(normalizeModelMessage(null), null)
+    })
+    await test('同一轮返回多个工具调用时逐个执行，不只跑第一个', async () => {
+      const run = create('并行调用')
+      let round = 0
+      await drive(run, async () => {
+        round++
+        if (round === 1) return { role: 'assistant', content: null, tool_calls: [
+          { id: 'p1', type: 'function', function: { name: 'search_memory', arguments: '{"query":"并行甲"}' } },
+          { id: 'p2', type: 'function', function: { name: 'search_memory', arguments: '{"query":"并行乙"}' } },
+          { id: 'p3', type: 'function', function: { name: 'search_memory', arguments: '{"query":"并行丙"}' } },
+          { id: 'p4', type: 'function', function: { name: 'search_memory', arguments: '{"query":"并行丁"}' } },
+          { id: 'p5', type: 'function', function: { name: 'finish_reply', arguments: '{"text":"已查完"}' } }
+        ] }
+        return call('finish_reply', { text: '已查完' })
+      })
+      const tools = store.getRun(run).events.filter(e => e.kind === 'tool').map(e => JSON.parse(e.text).tool)
+      assert.equal(tools.filter((t: string) => t === 'search_memory').length, 4, '五个调用都要执行，不能按个数判非法')
+      assert.equal(store.getRun(run).status, 'completed')
+    })
+    await test('网络失败要说到真实原因并区分可重试情况', () => {
+      const connectTimeout = Object.assign(new TypeError('fetch failed'), { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' } })
+      const text = fetchFailureText(connectTimeout, 60_000)
+      assert.match(text, /代理|网络/, '连接超时必须提示代理/网络，而不是只报 fetch failed')
+      assert.equal(isRetryableFetchError(connectTimeout), false, '自设超时重试只会让用户多等一轮')
+      assert.equal(isRetryableFetchError(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } })), true)
+      const aborted = Object.assign(new Error('aborted'), { name: 'AbortError' })
+      assert.equal(isRetryableFetchError(aborted), false)
+      assert.match(fetchFailureText(aborted, 60_000), /超时（60 秒）/)
+    })
     await planningTests(test)
     await profileTests(test)
     await draftTests(test)
     await constraintsTests(test)
     await statisticsTests(test)
     await attentionTests(test)
+    await studyTests(test)
+    await integrationTests(test)
     if (process.argv.includes('--live')) {
       const keyFile = process.env.AGENT_TEST_KEY_FILE
       if (!keyFile) throw new Error('真实验证需要AGENT_TEST_KEY_FILE。')

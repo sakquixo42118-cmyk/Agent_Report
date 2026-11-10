@@ -5,6 +5,11 @@ export interface AgentEvent {
   text: string
   createdAt: string
 }
+/** 助理等待回答时的提问：options 是候选答复，用户可点选，也可自己输入 */
+export interface AgentQuestion {
+  text: string
+  options: string[]
+}
 export interface PriorityChange {
   taskId: number
   title: string
@@ -19,6 +24,7 @@ export interface AgentRun {
   status: RunStatus
   events: AgentEvent[]
   pending: PendingChange | null
+  question: AgentQuestion | null
   updatedAt: string
   scene: string
   draftId: string | null

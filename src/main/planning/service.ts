@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { getDb } from '../db/database'
 import * as tasks from '../db/taskDao'
 import { computeScore } from '@shared/priority'
-import type { Course, CourseInput, PlanningSettings, PlanningSnapshot, PlanBlock, PlanPreview, Occupancy, CalendarExceptionInput, CalendarException, DayOverride } from '@shared/planning'
+import type { Course, CourseInput, CourseImportResult, ManualSlots, SlotCandidate, PlanningSettings, PlanningSnapshot, PlanBlock, PlanPreview, Occupancy, CalendarExceptionInput, CalendarException, DayOverride } from '@shared/planning'
 import { at, day, dateKey, daysBetween, freeIntervals, calendarOccupancy, daySettings, trial, overlaps } from './engine'
 import { durationEstimate, calibrationVersion } from '../memory/service'
 import { listExceptions, listDayOverrides, listDependencies, assertDependencies } from './constraints'
@@ -62,19 +62,55 @@ export function saveSettings(input: PlanningSettings): void {
     event('settings', input)
   })()
 }
-export function saveCourse(input: CourseInput): void {
+function validCourse(input: CourseInput): CourseInput {
   if (!input || typeof input.name !== 'string' || !input.name.trim() || input.name.length > 80) throw new Error('请输入1—80字课程/固定事件名。')
   integer(input.weekday, 1, 7); integer(input.startMin, 0, 1439); integer(input.endMin, 1, 1440)
   day(input.fromDate); day(input.toDate)
   if (input.startMin >= input.endMin || input.fromDate > input.toDate || new Date(input.toDate).getTime() - new Date(input.fromDate).getTime() > 370 * 86400000) throw new Error('课程时间或生效范围无效（最长一年）。')
+  return { ...input, name: input.name.trim() }
+}
+function assertNoBlockConflict(course: Course): void {
+  assertCalendarCompatible(settings(),[...listCourses(),course],listExceptions(),listDayOverrides())
+}
+export function saveCourse(input: CourseInput): void {
+  const course = { ...validCourse(input), id: -1 }
   getDb().transaction(() => {
-    const course: Course = { ...input, id: -1 }
     assertCalendarCompatible(settings(),[...listCourses(),course],listExceptions(),listDayOverrides())
     getDb().prepare('INSERT INTO calendar_courses(name,weekday,start_min,end_min,from_date,to_date) VALUES(?,?,?,?,?,?)')
-      .run(input.name.trim(), input.weekday, input.startMin, input.endMin, input.fromDate, input.toDate)
-    event('course_added', input)
+      .run(course.name, course.weekday, course.startMin, course.endMin, course.fromDate, course.toDate)
+    event('course_added', course)
   })()
 }
+/** 批量导入课表：同一批里重复的行直接跳过，与已有课程重叠只提示不拦截（重叠课程按区间减法合并）。 */
+export function importCourses(inputs: CourseInput[]): CourseImportResult {
+  if (!Array.isArray(inputs) || !inputs.length) throw new Error('没有可导入的课程。')
+  if (inputs.length > 200) throw new Error('一次最多导入200门课程。')
+  const courses = inputs.map((input, i) => {
+    try { return validCourse(input) }
+    catch (e) { throw new Error(`第${i + 1}门（${String(input?.name ?? '')}）：${e instanceof Error ? e.message : String(e)}`) }
+  })
+  const key = (c: { name: string; weekday: number; startMin: number; endMin: number; fromDate: string; toDate: string }): string =>
+    [c.name, c.weekday, c.startMin, c.endMin, c.fromDate, c.toDate].join('|')
+  return getDb().transaction(() => {
+    const existing = listCourses(), seen = new Set(existing.map(key))
+    const warnings: string[] = []
+    const stmt = getDb().prepare('INSERT INTO calendar_courses(name,weekday,start_min,end_min,from_date,to_date) VALUES(?,?,?,?,?,?)')
+    let added = 0, skipped = 0
+    for (const c of courses) {
+      if (seen.has(key(c))) { skipped++; continue }
+      const clash = existing.find(e => e.weekday === c.weekday && e.startMin < c.endMin && c.startMin < e.endMin &&
+        e.fromDate <= c.toDate && c.fromDate <= e.toDate)
+      if (clash) warnings.push(`「${c.name}」与「${clash.name}」在周${'一二三四五六日'[c.weekday - 1]} ${String(Math.floor(c.startMin / 60)).padStart(2, '0')}:${String(c.startMin % 60).padStart(2, '0')} 前后重叠，已一并导入。`)
+      assertNoBlockConflict({ ...c, id: -1 })
+      stmt.run(c.name, c.weekday, c.startMin, c.endMin, c.fromDate, c.toDate)
+      seen.add(key(c)); existing.push({ ...c, id: -1 }); added++
+      event('course_added', { ...c, source: 'import' })
+    }
+    event('courses_imported', { added, skipped, total: courses.length })
+    return { added, skipped, warnings }
+  })()
+}
+
 export function deleteCourse(id: number): void {
   integer(id, 1, Number.MAX_SAFE_INTEGER)
   getDb().transaction(() => {
@@ -82,6 +118,64 @@ export function deleteCourse(id: number): void {
     getDb().prepare('DELETE FROM calendar_courses WHERE id=?').run(id); event('course_removed', { id })
   })()
 }
+/** 手动安排：列出某任务在日期范围内的可用空档（已排除课程、执行安排与休息间隔） */
+export function manualSlots(taskId: number, startDate: string, endDate: string, now = Date.now()): ManualSlots {
+  integer(taskId,1,Number.MAX_SAFE_INTEGER)
+  const snap=snapshot(startDate,endDate),task=tasks.getTaskById(taskId),all=listBlocks()
+  if(!task||task.status!=='pending')throw new Error('只能为未完成的任务选择时段。')
+  const durationMin=Math.ceil(durationEstimate(task).estimateMin/15)*15,deadline=task.deadlineAt?new Date(task.deadlineAt).getTime():null
+  const own=all.filter(b=>b.taskId===taskId),deps=snap.dependencies
+  let blocked=own.some(b=>b.locked||b.start<now)?'已有安排锁定或已经开始，请先核对原安排。':''
+  let earliest=now,latest=deadline??Infinity
+  for(const d of deps.filter(d=>d.taskId===taskId&&d.prerequisiteStatus!=='done')){
+    const blocks=all.filter(b=>b.taskId===d.prerequisiteId)
+    if(d.prerequisiteStatus!=='pending'||!blocks.length||blocks.some(b=>b.end<=now))blocked=`前置任务「${d.prerequisiteTitle}」尚未完成且没有有效执行安排。`
+    else earliest=Math.max(earliest,...blocks.map(b=>b.end))
+  }
+  for(const d of deps.filter(d=>d.prerequisiteId===taskId&&d.taskStatus==='pending'))for(const b of all.filter(b=>b.taskId===d.taskId&&b.end>now))latest=Math.min(latest,b.start)
+  const occupied=snap.occupied.filter(o=>o.kind!=='task'||o.taskId!==taskId)
+  const days=daysBetween(startDate,endDate).map(date=>{
+    const config=daySettings(snap.settings,snap.dayOverrides,date)
+    const load=snap.blocks.filter(b=>b.taskId!==taskId&&dateKey(b.start)===date).reduce((sum,b)=>sum+(b.end-b.start)/60000,0)
+    const remainingCapacityMin=Math.max(0,config.dailyMaxMin-load)
+    let note=blocked||undefined
+    if(!task.deadlineConfirmed)note='截止日期还没确认，请先到任务的时间设置里确认。'
+    else if(task.rangeStart&&date<task.rangeStart)note='早于任务的允许起始日。'
+    else if(task.rangeEnd&&date>task.rangeEnd)note='晚于任务的允许截止日。'
+    else if(at(date,0)>=latest)note='这一天已超过截止或已安排后续任务的最晚界限。'
+    const candidates:SlotCandidate[]=[]
+    if(!note)for(const slot of freeIntervals(date,config,occupied,earliest)){
+      const local=new Date(slot.start),m=local.getHours()*60+local.getMinutes()+local.getSeconds()/60+local.getMilliseconds()/60000
+      const start=at(date,Math.ceil(m/15)*15),end=Math.min(slot.end,latest)
+      if(end<=start)continue
+      const freeMin=(end-start)/60000,reason=remainingCapacityMin<durationMin?`当天剩余容量 ${remainingCapacityMin} 分钟，这项要 ${durationMin} 分钟`:freeMin<durationMin?`空档只有 ${Math.floor(freeMin)} 分钟，这项要 ${durationMin} 分钟`:undefined
+      candidates.push({start,end,fits:!reason,reason})
+    }
+    return{date,remainingCapacityMin,candidates,note}
+  })
+  return{taskId,title:task.summary||task.content,durationMin,deadline,rangeStart:task.rangeStart,rangeEnd:task.rangeEnd,days,previous:own}
+}
+/** 人工选择也走共享确认事务：约束、账本、冻结基线与提醒目标一起生效。 */
+export function saveBlockAt(taskId:number,start:number,end:number,now=Date.now(),audit?:PlanAuditInput):{id:number}{
+  integer(taskId,1,Number.MAX_SAFE_INTEGER)
+  if(!Number.isFinite(start)||!Number.isFinite(end)||end<=start)throw new Error('时段参数无效，结束应晚于开始。')
+  return getDb().transaction(()=>{
+    const task=tasks.getTaskById(taskId),date=dateKey(start)
+    if(!task||task.status!=='pending')throw new Error('只能为未完成的任务安排时段。')
+    if(!task.deadlineConfirmed)throw new Error('截止日期还没确认，请先确认。')
+    if(start<now)throw new Error('不能安排在已经过去的时间。')
+    if(dateKey(end-1)!==date)throw new Error('一次只能安排一天内的时段。')
+    const previous=listBlocks().filter(b=>b.taskId===taskId)
+    if(previous.some(b=>b.locked||b.start<now))throw new Error('已有安排锁定或已经开始，不能直接移动。')
+    const snap=snapshot(date,date),block:PlanBlock={taskId,title:task.summary||task.content,start,end,locked:false,reason:`按自己选的空档安排，预留${Math.round((end-start)/60000)}分钟。`}
+    const p:PlanPreview={id:randomUUID(),runId:null,startDate:date,endDate:date,version:snap.version,createdAt:new Date(now).toISOString(),taskIds:[taskId],blocks:[block],unscheduled:[],previous,timeWindow:{startMin:0,endMin:1440}}
+    validateBlocks(p,now)
+    getDb().prepare('INSERT INTO plan_previews(id,run_id,json,created_at) VALUES(?,?,?,?)').run(p.id,null,JSON.stringify(p),p.createdAt)
+    commit(p.id,null,now,audit)
+    return{id:listBlocks().find(b=>b.taskId===taskId)!.id!}
+  })()
+}
+
 export function getFree(startDate: string, endDate: string, now = Date.now()): object {
   const data = snapshot(startDate, endDate)
   return { ...data, days: daysBetween(startDate, endDate).map(date => ({ date,

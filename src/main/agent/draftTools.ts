@@ -16,6 +16,7 @@ registerTool({ effect: 'read', definition: { type:'function', function: { name:'
   const s=drafts.readSource(owned(ctx));return {ok:true,data:{sourceText:s.raw_text,sourceRef:s.evidence_ref,sourceKind:s.kind},sourceRefs:[s.evidence_ref]}
 } })
 registerTool({ effect:'draft',definition:{type:'function',function:{name:'create_task_draft',description:'向本运行的草案增加一条候选事项，不创建正式任务。耗时未知可留空；未给硬截止可选none，语义不清用unknown；模型建议需备注说明，等待用户核对。',parameters:{type:'object',properties:fields,required:['content'],additionalProperties:false}}},execute:(a,ctx)=>result(drafts.addItem(owned(ctx),a as DraftInput)) })
+registerTool({ effect:'draft',definition:{type:'function',function:{name:'create_task_drafts',description:'一次向草案批量加入多条候选事项（1—12条），不创建正式任务。整份计划（如按章节拆分的复习计划）应一次提交；不要连续多次create_task_draft，逐条调用会耗尽轮次预算。每条仍需填写content与estimateGroup，estimateMin未知可留空。',parameters:{type:'object',properties:{items:{type:'array',minItems:1,maxItems:12,items:{type:'object',properties:fields,required:['content'],additionalProperties:false}}},required:['items'],additionalProperties:false}}},execute:(a,ctx)=>result(drafts.addItems(owned(ctx),a.items as DraftInput[])) })
 registerTool({ effect:'read',definition:{type:'function',function:{name:'get_task_draft',description:'读取当前运行的候选事项、版本和创建结果，用于修改或继续操作。',parameters:{type:'object',properties:{},additionalProperties:false}}},execute:(_a,ctx)=>{
   const d=drafts.forRun(owned(ctx));return d?result(d):{ok:false,errorCode:'NO_DRAFT',message:'尚无草案，可先澄清或create_task_draft。'}
 } })

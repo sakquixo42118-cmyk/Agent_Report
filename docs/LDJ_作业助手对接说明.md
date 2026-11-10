@@ -1,5 +1,21 @@
 # 给罗德金（ldj）的作业助手对接说明
 
+> 2026-11-10协作集成更新：当前为0.2.0-alpha.8 / 数据库v15。PR #1（来源Robrashi258/Agent_Report，提交637324fa）将资料解析、扫描PDF OCR、资料读取工具、独立助理页、课表批量导入和手动排期接回共享主线。下文alpha.7/v12和“待实现OCR”等描述保留为交接时记录，当前以[合并说明](PR1_协作合并与验证.md)为准。继续开发请先同步最新feature/planning-agent；不要继续占用已使用的迁移号10—15。
+
+已有fork的同步方式（先提交自己的修改，origin指向自己的fork）：
+
+```powershell
+git remote -v
+# 尚未设置upstream时执行一次；已有时先核对地址
+git remote add upstream https://github.com/sakquixo42118-cmyk/Agent_Report.git
+git fetch upstream
+git switch feature/planning-agent
+git merge upstream/feature/planning-agent
+git push origin feature/planning-agent
+```
+
+新增学习内容应复用src/main/study与现有Agent/草案确认。知识卡、错题、答案修订及复习证据仍是后续工作；按页资料问答已可复用get_study_documents/read_study_pages，不能把已有OCR重新做成另一套循环。
+
 更新日期：2026-11-09。仓库：[Agent_Report](https://github.com/sakquixo42118-cmyk/Agent_Report)。当前版本0.2.0-alpha.7，数据库v12，共享场景契约v1.0。
 
 **从feature/planning-agent拉取，基于它建立feature/study-assistant开发作业助手。**功能基线为`8473e61cdd6705e8b2cf17242a918138c476a158`。本说明及后续文档提交也在开发分支，因此HEAD可以比该基线新；必须包含该提交，不要求HEAD恰好等于它。main仍是0.1，直接从main开工会缺少共享Agent、草案、排班和消息能力。

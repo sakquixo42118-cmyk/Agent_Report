@@ -1,4 +1,4 @@
-import { ipcMain, type BrowserWindow } from 'electron'
+import { dialog, ipcMain, type BrowserWindow } from 'electron'
 import { IPC, type AppSettings, type Task, type TaskCreateInput, type TaskFilter, type TaskUpdateInput, type BatchCreateResult } from '@shared/types'
 import * as taskDao from './db/taskDao'
 import type { ChainGroup } from '@shared/types'
@@ -9,7 +9,7 @@ import type { RebalanceResult } from '@shared/types'
 import { AGENT_IPC } from '@shared/agent'
 import * as agent from './agent/runner'
 import * as agentStore from './agent/store'
-import { PLANNING_IPC, type CalendarExceptionInput, type DayOverride } from '@shared/planning'
+import { PLANNING_IPC, type CourseInput, type CalendarExceptionInput, type DayOverride } from '@shared/planning'
 import * as planning from './planning/service'
 import { PROFILE_IPC, type MemoryInput, type FeedbackInput } from '@shared/profile'
 import * as memory from './memory/service'
@@ -24,6 +24,9 @@ import * as attention from './attention/service'
 import {configureAttention,wakeAttention} from './attention/worker'
 import {sendAttentionDesktop} from './attention/desktop'
 import {prepareMessageRun} from './attention/bridge'
+import { STUDY_IPC, type StudyDocument, type StudyOcrResult, type StudyPickError, type StudyPickResult } from '@shared/study'
+import * as study from './study/documents'
+import * as ocr from './study/ocr'
 
 /** 广播任务变化（分析完成/手机端操作后刷新所有视图） */
 export function broadcastTaskChanged(win: BrowserWindow | null): void {
@@ -84,12 +87,61 @@ export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
   ipcMain.handle(PLANNING_IPC.dependencySave, (_e, id: number, prerequisite: number, version: unknown) => {planning.saveDependency(id,prerequisite,checkedVersion(version));changed()})
   ipcMain.handle(PLANNING_IPC.dependencyDelete, (_e, id: number, prerequisite: number, version: unknown) => {planning.deleteDependency(id,prerequisite,checkedVersion(version));changed()})
   ipcMain.handle(PLANNING_IPC.saveCourse, (_e, input) => { planning.saveCourse(input); changed() })
+  ipcMain.handle(PLANNING_IPC.importCourses, (_e, rows: CourseInput[]) => { const result = planning.importCourses(rows); changed(); return result })
   ipcMain.handle(PLANNING_IPC.deleteCourse, (_e, id: number) => { planning.deleteCourse(id); changed() })
   ipcMain.handle(PLANNING_IPC.settings, (_e, input) => { planning.saveSettings(input); changed() })
   ipcMain.handle(PLANNING_IPC.preview, (_e, ids: number[], start: string, end: string) => planning.preview(ids, start, end))
   ipcMain.handle(PLANNING_IPC.commit, (_e, id: string, audit?:PlanAuditInput) => { const result = planning.commit(id, null,Date.now(),audit); changed(); return result })
+  ipcMain.handle(PLANNING_IPC.freeSlots, (_e, taskId: number, start: string, end: string) => planning.manualSlots(taskId, start, end))
+  ipcMain.handle(PLANNING_IPC.saveBlock, (_e, taskId: number, start: number, end: number,audit?:PlanAuditInput) => { const result = planning.saveBlockAt(taskId, start, end,Date.now(),audit); changed(); return result })
   ipcMain.handle(PLANNING_IPC.lock, (_e, id: number, locked: boolean) => { planning.lockBlock(id, locked); changed() })
   ipcMain.handle(PLANNING_IPC.remove, (_e, id: number) => { planning.removeBlock(id); changed() })
+
+  // ===== 学习资料：路径只能由系统对话框产生，其余通道只接收记录编号 =====
+  const studyChanged = (): void => { const win = getWin(); if (win && !win.isDestroyed()) win.webContents.send(STUDY_IPC.changed) }
+  ipcMain.handle(STUDY_IPC.pick, async (): Promise<StudyPickResult> => {
+    const win = getWin()
+    const options = {
+      title: '选择教材或试卷',
+      properties: ['openFile', 'multiSelections'] as ('openFile' | 'multiSelections')[],
+      filters: [{ name: '可解析的文件', extensions: ['pdf', 'docx', 'txt', 'md'] }]
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    if (result.canceled) return { canceled: true, documents: [], errors: [] }
+    const documents: StudyDocument[] = []
+    const errors: StudyPickError[] = []
+    for (const file of result.filePaths) {
+      try {
+        const registered = await study.registerFile(file)
+        documents.push(await study.parseDocument(registered.id))
+      } catch (e) {
+        errors.push({ path: file, message: e instanceof Error ? e.message : '添加失败。' })
+      }
+    }
+    studyChanged()
+    return { canceled: false, documents, errors }
+  })
+  ipcMain.handle(STUDY_IPC.list, (): StudyDocument[] => study.listDocuments())
+  ipcMain.handle(STUDY_IPC.parse, async (_e, id: string): Promise<StudyDocument> => {
+    const doc = await study.parseDocument(id)
+    studyChanged()
+    return doc
+  })
+  ipcMain.handle(STUDY_IPC.remove, (_e, id: string) => { study.removeDocument(id); studyChanged() })
+  // 扫描件识别：进度按页推送，取消只置标记（已识别的页不会回滚）
+  ipcMain.handle(STUDY_IPC.ocr, async (_e, id: string, fromPage?: number, toPage?: number): Promise<StudyOcrResult> => {
+    const result = await ocr.ocrDocument(id, {
+      fromPage,
+      toPage,
+      onProgress: (progress) => {
+        const win = getWin()
+        if (win && !win.isDestroyed()) win.webContents.send(STUDY_IPC.ocrProgress, progress)
+      }
+    })
+    studyChanged()
+    return result
+  })
+  ipcMain.handle(STUDY_IPC.ocrCancel, (_e, id: string) => { ocr.cancelOcr(id) })
   setBroadcastFn(() => broadcastTaskChanged(getWin()))
   agentStore.recoverInterruptedRuns()
   agent.setAgentNotify(() => {
@@ -153,7 +205,7 @@ export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
 
   ipcMain.handle(IPC.taskBatchCreate, (): BatchCreateResult => { throw new Error('直接批量创建已停用，请使用batchPreview预览并确认。') })
 
-  ipcMain.handle(IPC.scheduleRebalance, (): RebalanceResult => { throw new Error('旧按天分配已停用，请在今日助理或日程中试排。') })
+  ipcMain.handle(IPC.scheduleRebalance, (): RebalanceResult => { throw new Error('旧按天分配已停用，请在助理页或日程中试排。') })
 
   ipcMain.handle(IPC.projectList, (): taskDao.ProjectGroup[] => taskDao.listProjects())
 
@@ -191,7 +243,7 @@ export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
   })
 
   ipcMain.handle(IPC.projectRebalance, (_e, projectId: string): RebalanceResult => {
-    throw new Error('请在今日助理查询此项目任务，再试排具体执行时间。')
+    throw new Error('请在助理页查询此项目任务，再试排具体执行时间。')
   })
 
   ipcMain.handle(IPC.settingsGet, (): AppSettings => getSettings())

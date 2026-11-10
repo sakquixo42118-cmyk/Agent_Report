@@ -3,6 +3,7 @@ export interface Course {
   fromDate: string; toDate: string
 }
 export interface CourseInput { name: string; weekday: number; startMin: number; endMin: number; fromDate: string; toDate: string }
+export interface CourseImportResult { added: number; skipped: number; warnings: string[] }
 export interface PlanningSettings { startMin: number; endMin: number; dailyMaxMin: number; breakMin: number }
 export interface CalendarExceptionInput {
   kind: 'cancel_course' | 'makeup_course' | 'busy'; date: string; courseId: number | null
@@ -32,9 +33,19 @@ export interface PlanPreview {
   timeWindow: { startMin: number; endMin: number }
 }
 export interface PlanChange { type: 'plan'; preview: PlanPreview }
+/** 手动选时段：某天的可用空档及其不可用原因 */
+export interface SlotCandidate { start: number; end: number; fits: boolean; reason?: string }
+export interface DaySlots { date: string; remainingCapacityMin: number; candidates: SlotCandidate[]; note?: string }
+export interface ManualSlots {
+  previous: PlanBlock[]
+  taskId: number; title: string; durationMin: number; deadline: number | null
+  rangeStart: string | null; rangeEnd: string | null; days: DaySlots[]
+}
 export const PLANNING_IPC = {
-  read: 'planning:read', saveCourse: 'planning:saveCourse', deleteCourse: 'planning:deleteCourse',
+  read: 'planning:read', saveCourse: 'planning:saveCourse', importCourses: 'planning:importCourses',
+  deleteCourse: 'planning:deleteCourse',
   settings: 'planning:settings', preview: 'planning:preview', commit: 'planning:commit',
+  freeSlots: 'planning:freeSlots', saveBlock: 'planning:saveBlock',
   lock: 'planning:lock', remove: 'planning:remove'
   ,exceptionSave: 'planning:exceptionSave', exceptionDelete: 'planning:exceptionDelete',
   daySave: 'planning:daySave', dayDelete: 'planning:dayDelete',

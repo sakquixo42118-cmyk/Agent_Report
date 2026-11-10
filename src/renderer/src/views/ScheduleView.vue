@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import type { PlanningSnapshot, PlanPreview, PlanBlock } from '@shared/planning'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import type { PlanningSnapshot, PlanPreview, PlanBlock, ManualSlots, SlotCandidate } from '@shared/planning'
 import { tasksStore } from '../stores/tasks'
 import { localDay, plusDays, clock, minute, formatTime } from '../lib/planningTime'
+import {parseTimetable} from '@shared/timetable'
 import PlanPreviewCard from '../components/PlanPreviewCard.vue'
 import PlanningConstraintsEditor from '../components/PlanningConstraintsEditor.vue'
 import PlanReasonEditor from '../components/PlanReasonEditor.vue'
@@ -15,6 +16,23 @@ const data = ref<PlanningSnapshot | null>(null), error = ref(''), notice = ref('
 const selected = ref<number[]>([])
 const windowStart = ref('08:00'), windowEnd = ref('22:00'), dailyMax = ref(240), breakMin = ref(10)
 const courseName = ref(''), weekday = ref(1), courseStart = ref('09:00'), courseEnd = ref('10:40'), courseFrom = ref(localDay()), courseTo = ref(plusDays(localDay(), 112))
+// 批量导入：粘贴文本 → 本地解析预览 → 一次写库
+const importText = ref(''), importFrom = ref(localDay()), importTo = ref(plusDays(localDay(), 112)), importWarnings = ref<string[]>([])
+const parsed = computed(() => parseTimetable(importText.value, importFrom.value, importTo.value))
+const SAMPLE = `# 示例课表：一行一门课，逗号/制表符/空格分隔都可以；# 开头为注释
+数学分析, 周一, 08:00-09:40
+大学英语（读写）, 周一, 10:00-11:40
+高等代数, 周二, 08:00-09:40
+数据结构, 周二, 14:00-15:40
+体育（篮球）, 周三, 10:00-11:40
+形势与政策, 周三, 19:00-20:40, 2026-11-11~2026-12-23
+概率论与数理统计, 周四, 08:00-09:40
+操作系统, 周四, 14:00-15:40
+英语视听说, 周五, 10:00-11:40
+算法设计与分析实验, 周五, 14:00-16:30
+考研数学答疑, 周日, 19:00-20:40`
+function fillSample(): void { importText.value = SAMPLE; importWarnings.value = [] }
+
 const pending = computed(() => tasksStore.tasks.filter(t => t.status === 'pending'))
 const dates = computed(() => Array.from({ length: 7 }, (_, i) => plusDays(startDate.value, i)))
 const gridStart=computed(()=>Math.min(data.value?.settings.startMin??480,...(data.value?.effectiveDays.map(d=>d.settings.startMin)??[]),...(data.value?.occupied.map(b=>new Date(b.start).getHours()*60+new Date(b.start).getMinutes())??[])))
@@ -49,6 +67,77 @@ async function commit(): Promise<void> {
   const id = preview.value.id
   await action(async () => { await window.api.planningCommit(id,hasMoves.value?{reason:audit.value.reason,note:audit.value.note}:undefined); preview.value = null }, '计划已保存，截止时间未变。')
 }
+async function doImport(): Promise<void> {
+  const rows = parsed.value.rows
+  if (busy.value || !rows.length) return
+  busy.value = true; error.value = ''; notice.value = ''; importWarnings.value = []
+  try {
+    const result = await window.api.courseImport(rows)
+    importWarnings.value = result.warnings
+    notice.value = `已导入 ${result.added} 门课程` + (result.skipped ? `，跳过 ${result.skipped} 行重复` : '') +
+      (result.warnings.length ? `；${result.warnings.length} 处时段重叠，已一并导入` : '')
+    importText.value = ''
+    await refresh()
+  } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
+  finally { busy.value = false }
+}
+// 手动选时段：先挑任务，再从当天空档里选一段
+const manualAudit=ref<PlanAuditInput>({reason:'unspecified',note:''})
+const manualIsMove=computed(()=>!!manual.value?.previous.length)
+const manualTaskId = ref<number | null>(null)
+const manual = ref<ManualSlots | null>(null), manualDay = ref(''), pickIndex = ref(-1), pickStart = ref(0)
+const manualDaySlots = computed(() => manual.value?.days.find(d => d.date === manualDay.value) ?? null)
+const manualDuration = computed(() => (manual.value?.durationMin ?? 0) * 60000)
+const pickCandidate = computed<SlotCandidate | null>(() => manualDaySlots.value?.candidates[pickIndex.value] ?? null)
+const startChoices = computed(() => (pickCandidate.value ? startOptions(pickCandidate.value, manualDuration.value) : []))
+function hm(ts: number): string {
+  const d = new Date(ts)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+function slotMinutes(c: SlotCandidate): number { return Math.round((c.end - c.start) / 60000) }
+/** 空档内的候选开始时间：15 分钟一档，首项若不是整刻也保留，方便从"现在"直接开始 */
+function startOptions(c: SlotCandidate, need: number): number[] {
+  const step = 15 * 60000, last = c.end - need
+  if (last < c.start) return []
+  const out: number[] = [], first = Math.ceil(c.start / step) * step
+  if (c.start < first) out.push(c.start)
+  for (let v = first; v <= last; v += step) out.push(v)
+  return out
+}
+async function loadSlots(keepDay = false): Promise<void> {
+  if (!manualTaskId.value) { manual.value = null; manualDay.value = ''; pickIndex.value = -1; return }
+  try {
+    const result = await window.api.planningFreeSlots(manualTaskId.value, startDate.value, endDate.value)
+    manual.value = result
+    if (!keepDay || !result.days.some(d => d.date === manualDay.value)) {
+      const target = result.days.find(d => d.candidates.some(c => c.fits)) ?? result.days.find(d => d.candidates.length) ?? result.days[0]
+      manualDay.value = target?.date ?? ''
+    }
+    pickIndex.value = -1
+  } catch (e) { error.value = e instanceof Error ? e.message : String(e); manual.value = null }
+}
+function pick(index: number): void {
+  const c = manualDaySlots.value?.candidates[index]
+  if (!c) return
+  pickIndex.value = index
+  pickStart.value = startOptions(c, manualDuration.value)[0] ?? c.start
+}
+async function savePick(): Promise<void> {
+  const taskId = manualTaskId.value, c = pickCandidate.value
+  if (!taskId || !c || busy.value) return
+  const start = pickStart.value, end = start + manualDuration.value
+  busy.value = true; error.value = ''; notice.value = ''
+  try {
+    await window.api.planningSaveBlock(taskId, start, end,manualIsMove.value?{reason:manualAudit.value.reason,note:manualAudit.value.note}:undefined)
+    notice.value = `已安排「${manual.value?.title ?? ''}」${hm(start)}—${hm(end)}，可在下方“已保存执行时段”里锁定或移除。`
+    await refresh(); await loadSlots(true)
+  } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
+  finally { busy.value = false }
+}
+async function reload(): Promise<void> { await refresh(); await loadSlots(true) }
+watch(manualTaskId, () => { manualAudit.value={reason:'unspecified',note:''};void loadSlots() })
+watch(manualDay, () => { pickIndex.value = -1 })
+
 function style(b: { start: number; end: number }): Record<string, string> {
   const a = new Date(b.start), z = new Date(b.end), from = gridStart.value, to = gridEnd.value
   const start = a.getHours() * 60 + a.getMinutes(), end = localDay(z) !== localDay(a) ? 1440 : z.getHours() * 60 + z.getMinutes()
@@ -58,12 +147,12 @@ function shownOnDate(date: string): PlanningSnapshot['occupied'] {
   return data.value?.occupied.filter(b => localDay(new Date(b.start)) === date) ?? []
 }
 async function lock(b: PlanBlock): Promise<void> { await action(() => window.api.planningLock(b.id!, !b.locked), '锁定状态已更新。') }
-onMounted(() => { void refresh(true); removeListener = window.api.onTaskChanged(() => void refresh()) })
+onMounted(() => { void refresh(true); removeListener = window.api.onTaskChanged(() => {void refresh();if(manualTaskId.value)void loadSlots(true)}) })
 onUnmounted(() => removeListener?.())
 </script>
 <template>
   <div class="planning-view">
-    <header class="heading"><h2>课表与执行计划</h2><label>查看起始日 <input v-model="startDate" type="date" @change="refresh()" /></label></header>
+    <header class="heading"><h2>课表与执行计划</h2><label>查看起始日 <input v-model="startDate" type="date" @change="reload()" /></label></header>
     <p class="intro">课程占用与执行安排同屏查看。任务截止是提交期限，执行块表示准备何时做，二者独立保存。</p>
     <p v-if="error" role="alert" class="error">{{ error }}</p><p v-if="notice" role="status" class="notice">{{ notice }}</p>
     <details class="panel" open><summary>可安排时间与课表录入</summary>
@@ -81,6 +170,23 @@ onUnmounted(() => removeListener?.())
       </form>
       <ul class="courses"><li v-for="c in data?.courses" :key="c.id"><span>{{ c.name }} · 周{{ ['一','二','三','四','五','六','日'][c.weekday-1] }} {{ clock(c.startMin) }}—{{ clock(c.endMin) }} · {{ c.fromDate }}至{{ c.toDate }}</span><button :disabled="busy" @click="action(() => api.courseDelete(c.id), '课程已移除。')">移除课程</button></li></ul>
     </details>
+    <details class="panel">
+      <summary>批量导入课表</summary>
+      <p>每行一门课，<code>课程名, 周一, 08:00-09:40</code>；末列可选填生效范围 <code>2026-09-01~2027-01-15</code>。逗号、制表符、空格分隔均可，<code>#</code> 开头为注释。直接从教务系统或 Excel 复制粘贴即可。</p>
+      <div class="fields import-range">
+        <label>默认生效起日<input v-model="importFrom" type="date" /></label>
+        <label>默认生效止日<input v-model="importTo" type="date" /></label>
+        <button type="button" class="secondary" @click="fillSample">填入示例课表</button>
+      </div>
+      <textarea v-model="importText" class="import-text" rows="7" spellcheck="false" placeholder="数学分析, 周一, 08:00-09:40"></textarea>
+      <div class="import-foot">
+        <button :disabled="busy || !parsed.rows.length" @click="doImport">导入 {{ parsed.rows.length }} 门课程</button>
+        <span v-if="parsed.issues.length" class="warn">{{ parsed.issues.length }} 行无法识别，不会被导入</span>
+      </div>
+      <ul v-if="parsed.rows.length" class="import-preview"><li v-for="(r,i) in parsed.rows" :key="i">{{ r.name }} · 周{{ ['一','二','三','四','五','六','日'][r.weekday-1] }} {{ clock(r.startMin) }}—{{ clock(r.endMin) }} · {{ r.fromDate }}至{{ r.toDate }}</li></ul>
+      <ul v-if="parsed.issues.length" class="import-issues"><li v-for="e in parsed.issues" :key="e.line">第{{ e.line }}行：{{ e.message }}<small>{{ e.text }}</small></li></ul>
+      <ul v-if="importWarnings.length" class="import-issues"><li v-for="(w,i) in importWarnings" :key="i">{{ w }}</li></ul>
+    </details>
     <PlanningConstraintsEditor v-if="data" :data="data" :date="startDate" @changed="refresh()" />
     <div class="week-scroll"><div class="week-grid"><div v-for="date in dates" :key="date" class="day-col"><header>{{ date.slice(5) }} 周{{ ['日','一','二','三','四','五','六'][new Date(date+'T12:00:00').getDay()] }}</header>
       <small class="day-capacity">{{ data?.effectiveDays.find(d=>d.date===date)?.mode==='light'?'轻量':'正常' }} · {{ data?.effectiveDays.find(d=>d.date===date)?.settings.dailyMaxMin??dailyMax }}分钟</small>
@@ -93,6 +199,47 @@ onUnmounted(() => removeListener?.())
       <button :disabled="busy || !selected.length" @click="trial">按课表试排（{{ selected.length }}项）</button>
       <div v-if="preview" class="trial-result"><PlanPreviewCard :preview="preview" /><PlanReasonEditor v-if="hasMoves" v-model="audit" /><button :disabled="busy || !preview.blocks.length" @click="commit">确认保存这份计划</button><button class="secondary" @click="preview=null">放弃预览</button></div>
     </section>
+    <section class="panel"><h3>自主选择时段</h3>
+      <p>先选一项任务，再挑一天的空档保存。空档已排除课程、已保存的执行安排和任务间休息；想让助理按优先级自动排，可在“助理”里说一声。</p>
+      <p v-if="!pending.length" class="muted">暂无待安排的任务。先在“待确认”里确认事项，或到“助理”里录入。</p>
+      <div v-else class="choices">
+        <label v-for="t in pending" :key="t.id" :class="{ off: !t.deadlineConfirmed }">
+          <input v-model.number="manualTaskId" type="radio" :value="t.id" :disabled="!t.deadlineConfirmed" />
+          {{ t.summary || t.content }} · {{ t.estimateMin }}分钟
+          <small v-if="!t.deadlineConfirmed">日期待确认</small>
+          <small v-else-if="t.deadlineAt">截止 {{ formatTime(new Date(t.deadlineAt).getTime()) }}</small>
+        </label>
+      </div>
+      <div v-if="manual" class="manual">
+        <p class="manual-head"><strong>{{ manual.title }}</strong> · 需连续 {{ manual.durationMin }} 分钟<span v-if="manual.deadline"> · 不晚于 {{ formatTime(manual.deadline) }}</span></p>
+        <div class="day-picker">
+          <button v-for="d in manual.days" :key="d.date" type="button" class="day-chip" :class="{ active: d.date === manualDay }" :disabled="!!d.note || !d.candidates.length" :title="d.note ?? ''" @click="manualDay = d.date">
+            {{ d.date.slice(5) }} 周{{ ['日','一','二','三','四','五','六'][new Date(d.date+'T12:00:00').getDay()] }}
+            <span>{{ d.candidates.length ? d.candidates.length + ' 段空档' : '无可选' }}</span>
+          </button>
+        </div>
+        <div v-if="manualDaySlots" class="day-slots">
+          <p v-if="manualDaySlots.note" class="muted">{{ manualDaySlots.note }}</p>
+          <p v-else-if="!manualDaySlots.candidates.length" class="muted">这天没有可用空档，换一天看看。</p>
+          <ul v-else class="slots">
+            <li v-for="(c,i) in manualDaySlots.candidates" :key="i" :class="{ fits: c.fits, picked: pickIndex === i }">
+              <span class="slot-time">{{ hm(c.start) }}—{{ hm(c.end) }}</span>
+              <small class="slot-len">空 {{ slotMinutes(c) }} 分钟</small>
+              <small v-if="c.reason" class="why">{{ c.reason }}</small>
+              <template v-if="c.fits">
+                <button v-if="pickIndex !== i" type="button" class="secondary" @click="pick(i)">用这段</button>
+                <div v-else class="pick">
+                  <label>开始 <select v-model.number="pickStart"><option v-for="s in startChoices" :key="s" :value="s">{{ hm(s) }}</option></select></label>
+                  <span class="pick-end">结束 {{ hm(pickStart + manualDuration) }}</span>
+                  <PlanReasonEditor v-if="manualIsMove" v-model="manualAudit" /><button type="button" :disabled="busy" @click="savePick">保存这个时段</button>
+                  <button type="button" class="secondary" @click="pickIndex = -1">取消</button>
+                </div>
+              </template>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </section>
     <section class="panel"><h3>已保存执行时段</h3><p v-if="!data?.blocks.length">尚无执行安排。</p>
       <div v-for="b in data?.blocks" :key="b.id" class="saved-block"><div><strong>{{ b.title }}</strong><p>{{ formatTime(b.start) }} — {{ formatTime(b.end) }}</p></div><button :disabled="busy" @click="lock(b)">{{ b.locked ? '解锁' : '锁定' }}</button><button class="secondary" :disabled="busy" @click="action(() => api.planningRemove(b.id!), '执行安排已移除，任务及截止保留。')">移除安排</button></div>
     </section>
@@ -101,4 +248,28 @@ onUnmounted(() => removeListener?.())
 <style scoped>
 .day-capacity{display:block;text-align:center;padding:5px;background:var(--bg);font-size:10px;color:var(--text-2)}.day-track article.busy{background:#f0e7fa;color:#6a3c91;border-color:#9a68c7}
 .heading{display:flex;justify-content:space-between;align-items:center;gap:12px}.heading h2{font-size:20px}.heading label,.intro{font-size:13px;color:var(--text-2)}.panel{padding:16px;margin:16px 0;background:var(--panel);border:1px solid var(--border);border-radius:12px}.panel h3{font-size:15px}.panel>p{font-size:13px;color:var(--text-3);line-height:1.7}.panel summary{cursor:pointer;font-weight:600}.fields{display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin:15px 0}.fields label{display:grid;gap:5px;font-size:12px}.fields input,.fields select,.heading input{padding:7px;border:1px solid var(--border);border-radius:6px;color:var(--text);background:var(--panel)}.fields input[type=number]{width:115px}button{padding:8px 11px;background:var(--primary);color:white;border-radius:7px;cursor:pointer;font-size:12px}button:disabled{opacity:.5;cursor:default}.secondary{background:var(--bg);color:var(--text-2);border:1px solid var(--border);margin-left:8px}.courses{list-style:none;padding:0}.courses li{display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-top:1px solid var(--border);font-size:12px}.courses button{background:var(--bg);color:var(--text-2)}.week-scroll{overflow-x:auto;border:1px solid var(--border);border-radius:12px;background:var(--panel)}.week-grid{display:grid;grid-template-columns:repeat(7,minmax(105px,1fr));min-width:770px}.day-col{border-right:1px solid var(--border)}.day-col>header{text-align:center;font-size:12px;padding:12px;background:var(--bg)}.day-track{height:430px;position:relative;background:var(--panel)}.hour-tick{position:absolute;left:0;right:0;border-top:1px solid var(--border);color:var(--text-3);font-size:9px;padding-left:3px;pointer-events:none}.day-track article{position:absolute;left:5%;width:90%;overflow:hidden;padding:4px;border-radius:5px;border-left:3px solid var(--primary);background:#e8efff;color:#254f9d;box-sizing:border-box}.day-track article.course{background:#fbefcf;color:#74571b;border-color:#c59e43}.day-track strong,.day-track small{display:block;font-size:11px;overflow-wrap:anywhere}.choices{display:flex;flex-wrap:wrap;gap:12px;margin:12px 0}.choices label{font-size:13px;padding:9px;background:var(--bg);border-radius:7px}.choices input{margin-right:7px}.choices small{color:#94651d}.trial-result{margin-top:15px;padding-top:12px;border-top:1px solid var(--border)}.saved-block{display:flex;align-items:center;gap:8px;border-top:1px solid var(--border);padding:12px 0}.saved-block>div{flex:1}.saved-block p{font-size:12px;color:var(--text-3);margin:5px 0}.error{color:#b13c26;background:#fff0e9;padding:10px;border-radius:8px}.notice{color:#286345;background:#eaf6ee;padding:10px;border-radius:8px}
+</style>
+
+<style scoped>
+.muted{font-size:12px;color:var(--text-3);line-height:1.7}
+.choices label.off{opacity:.55}
+.manual-head{font-size:13px;color:var(--text-2)}
+.day-picker{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.day-chip{display:grid;gap:2px;padding:8px 10px;background:var(--bg);color:var(--text-2);border:1px solid var(--border);border-radius:8px;font-size:12px;text-align:center}
+.day-chip span{font-size:11px;color:var(--text-3)}
+.day-chip.active{background:var(--primary-light);border-color:var(--primary);color:var(--primary)}
+.day-chip.active span{color:var(--primary)}
+.day-chip:disabled{opacity:.45;cursor:default}
+.slots{list-style:none;padding:0;margin:10px 0 0;display:grid;gap:8px}
+.slots li{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:9px 11px;border:1px solid var(--border);border-radius:9px;background:var(--panel);font-size:13px}
+.slots li.fits{border-color:#bcd6ff;background:#f7faff}
+.slots li.picked{border-color:var(--primary);box-shadow:inset 0 0 0 1px var(--primary)}
+.slot-time{font-weight:500}
+.slot-len{font-size:12px;color:var(--text-3)}
+.slots .why{font-size:12px;color:#94651d;flex:1 0 100%}
+.slots button{margin-left:auto}
+.pick{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-left:auto}
+.pick label{font-size:12px;color:var(--text-2);display:flex;align-items:center;gap:6px}
+.pick select{padding:5px 7px;border:1px solid var(--border);border-radius:6px;background:var(--panel);color:var(--text);font-size:12px}
+.pick-end{font-size:12px;color:var(--text-2)}
 </style>

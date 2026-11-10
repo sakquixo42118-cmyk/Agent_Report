@@ -12,6 +12,10 @@ files:
 asarUnpack:
   - resources/**
   - node_modules/better-sqlite3/**
+  # pdfjs-dist 是纯 ESM，需从 asar 解包后用 file:// 动态 import
+  - node_modules/pdfjs-dist/**
+  # 扫描件识别要把 PDF 页画成图片，原生 .node 二进制不能在 asar 内加载
+  - node_modules/@napi-rs/**
 win:
   executableName: 随手计划
   target:

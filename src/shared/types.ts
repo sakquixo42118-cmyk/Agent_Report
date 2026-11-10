@@ -73,6 +73,7 @@ export interface AppSettings {
   aiBaseUrl: string
   aiApiKey: string
   aiModel: string
+  ocrModel: string
   notifyEnabled: boolean
   notifyAdvanceHours: number
   lanEnabled: boolean
@@ -84,6 +85,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   aiBaseUrl: '',
   aiApiKey: '',
   aiModel: '',
+  ocrModel: '',
   notifyEnabled: true,
   notifyAdvanceHours: 24,
   lanEnabled: false,

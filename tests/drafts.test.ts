@@ -97,6 +97,35 @@ export async function draftTests(test:Test):Promise<void>{
   await test('停止运行保留草案，放弃草案不创建任务',()=>{
     const r=startBatch('D4-放弃'),d=drafts.getDraft(r.draftId!);confirmTaskDraft(d.id,d.version,false);assert.equal(drafts.getDraft(d.id).state,'discarded');assert.equal(drafts.getDraft(d.id).createdTaskIds.length,0)
   })
+  await test('放弃后再录入重新开始，而不是卡在"已放弃"',()=>{
+    const before=tasks.listTasks().length
+    const r=startBatch('D4-放弃后重来'),d=drafts.getDraft(r.draftId!)
+    confirmTaskDraft(d.id,d.version,false)
+    const again=drafts.addItem(r.id,{content:'D4-放弃后新增',estimateMin:30,estimateGroup:'阶段4测试',deadlineMode:'none'})
+    assert.equal(again.state,'editing');assert.deepEqual(again.items.map(i=>i.content),['D4-放弃后新增'])
+    assert.ok(again.version>d.version,'重开要产生新版本，旧卡片不能继续生效')
+    assert.equal(tasks.listTasks().length,before)
+  })
+  await test('同一对话里放弃草案后，模型能重新提交整份计划',async()=>{
+    const before=tasks.listTasks().length
+    const items=Array.from({length:3},(_,i)=>({content:`D4-重建计划${i+1}`,estimateMin:40,estimateGroup:'阶段4测试',deadlineMode:'none',category:'学习'}))
+    const submit=():ModelTransport=>{let step=0;return async(_s,m)=>{
+      if(step++===0)return call('create_task_drafts',{items})
+      const d=JSON.parse(m.at(-1)!.content!).data
+      return call('propose_task_draft',{draftId:d.id,expectedVersion:d.version})
+    }}
+    const r=startCapture('D4-重建计划',submit());await idle(r.id)
+    const first=store.getRun(r.id),draftId=first.draftId!
+    confirmTaskDraft(draftId,drafts.getDraft(draftId).version,false)
+    assert.equal(store.getRun(r.id).status,'completed')
+    assert.equal(drafts.getDraft(draftId).state,'discarded')
+    sendMessage(r.id,'换成按章拆分的复习计划',submit());await idle(r.id)
+    const run=store.getRun(r.id)
+    assert.equal(run.status,'awaiting_confirmation','放弃后必须还能提出新草案')
+    assert.equal(run.draftId,draftId,'同一对话仍只有一份草案')
+    assert.equal(drafts.getDraft(draftId).items.length,3)
+    assert.equal(tasks.listTasks().length,before)
+  })
   await test('场景白名单不暴露其他写工具，不能伪造用户确认',()=>{
     const r=startMockReview(),before=tasks.listTasks().length
     assert.equal(definitionsForScene('study_mock').some(d=>d.function.name==='propose_memory'),false)
@@ -129,6 +158,31 @@ export async function draftTests(test:Test):Promise<void>{
     const r=continueDraftPlan(d.id,model),same=continueDraftPlan(d.id,model);assert.equal(r.id,same.id);await idle(r.id);assert.equal(store.getRun(r.id).status,'awaiting_confirmation');confirmChange(r.id,true)
     assert.ok(planning.listBlocks().some(p=>p.taskId===saved.createdTaskIds[0]));assert.equal(tasks.getTaskById(saved.createdTaskIds[0])!.deadlineAt,null)
     assert.throws(()=>registerReviewProvider({id:'mock_study',getProposal:()=>{throw new Error()}}),/重复/)
+  })
+  await test('整份计划用批量工具一次提交，不逐条调用',async()=>{
+    const before=tasks.listTasks().length
+    let steps=0,toolCalls=0
+    const model:ModelTransport=async(_s,m)=>{
+      toolCalls++
+      if(steps++===0){
+        const items=Array.from({length:8},(_,i)=>({content:`D4-第${i+1}章复习`,estimateMin:60,estimateGroup:'数学分析',deadlineMode:'none',category:'学习'}))
+        return call('create_task_drafts',{items})
+      }
+      const d=JSON.parse(m.at(-1)!.content!).data
+      return call('propose_task_draft',{draftId:d.id,expectedVersion:d.version})
+    }
+    const r=startCapture('按教材八章安排复习',model);await idle(r.id)
+    const run=store.getRun(r.id)
+    assert.equal(toolCalls,2,'八条计划应两轮完成，而不是九轮')
+    assert.equal(run.status,'awaiting_confirmation')
+    assert.equal(drafts.getDraft(run.draftId!).items.length,8)
+    assert.equal(tasks.listTasks().length,before,'确认前不创建正式任务')
+  })
+  await test('批量提交超过12条或空数组会被拒绝',()=>{
+    const run=store.createRun('D4-批量上限',[{role:'user',content:'D4-批量上限'}],'capture')
+    const many=Array.from({length:13},(_,i)=>({content:`D4-超额${i}`}))
+    assert.throws(()=>drafts.addItems(run,many),/12/)
+    assert.throws(()=>drafts.addItems(run,[]),/至少提交1条/)
   })
   getDb().prepare('DELETE FROM plan_blocks WHERE task_id IN (SELECT task_id FROM task_draft_links)').run()
   ownTaskIds.forEach(id=>tasks.deleteTask(id))

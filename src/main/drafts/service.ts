@@ -39,10 +39,26 @@ export function forRun(runId: string): TaskDraft | null {
   const row = getDb().prepare('SELECT id FROM task_drafts WHERE run_id=?').get(runId) as { id: string } | undefined
   return row ? getDraft(row.id) : null
 }
+/**
+ * 每个运行只有一份草案（task_drafts.run_id 唯一）。
+ * 用户放弃后再录入时必须能继续：清空条目并回到 editing，否则模型只会收到"已放弃"并反复重试到耗尽轮次。
+ */
+function reopen(d: TaskDraft): TaskDraft {
+  const now = new Date().toISOString()
+  const info = getDb().prepare(`UPDATE task_drafts SET items_json='[]',created_ids_json='[]',state='editing',version=version+1,updated_at=?
+    WHERE id=? AND version=? AND state='discarded'`).run(now, d.id, d.version)
+  if (!info.changes) throw new Error('草案已变化，请读取最新草案。')
+  getDb().prepare('INSERT INTO task_draft_revisions(draft_id,version,items_json,actor,created_at) VALUES(?,?,?,?,?)')
+    .run(d.id, d.version + 1, '[]', 'reopen', now)
+  return getDraft(d.id)
+}
 export function ensureDraft(runId: string): TaskDraft {
   store.row(runId); source(runId)
   const existing = forRun(runId)
-  if (existing) return existing
+  if (existing) {
+    if (existing.state === 'committed') throw new Error('本次草案已确认创建任务；继续添加事项请新建对话。')
+    return existing.state === 'discarded' ? reopen(existing) : existing
+  }
   const id = randomUUID()
   getDb().prepare('INSERT INTO task_drafts(id,run_id,items_json,updated_at) VALUES(?,?,?,?)').run(id, runId, '[]', new Date().toISOString())
   getDb().prepare('INSERT INTO task_draft_revisions(draft_id,version,items_json,actor,created_at) VALUES(?,?,?,?,?)').run(id,1,'[]','initial',new Date().toISOString())
@@ -70,7 +86,8 @@ export function normalizeItem(input: DraftInput, existing?: DraftItem, origin: D
   return item
 }
 function update(d: TaskDraft, items: DraftItem[],actor='model'): TaskDraft {
-  if (d.state !== 'editing') throw new Error('此草案已提交或放弃，请新建录入。')
+  if (d.state === 'committed') throw new Error('本次草案已确认创建任务；继续添加事项请新建对话。')
+  if (d.state !== 'editing') throw new Error('这份草案已放弃，正在重新开始：请先添加候选事项，再读取草案。')
   if (items.length > 60) throw new Error('每批最多60项，请分批处理。')
   const info = getDb().prepare('UPDATE task_drafts SET items_json=?,version=version+1,updated_at=? WHERE id=? AND version=? AND state=\'editing\'')
     .run(JSON.stringify(items), new Date().toISOString(), d.id, d.version)
@@ -89,6 +106,22 @@ export function addItem(runId: string, input: DraftInput, origin: DraftItem['ori
     const duplicate = d.items.find(i => fields.every(k => JSON.stringify(i[k as keyof DraftItem]) === JSON.stringify(item[k as keyof DraftItem])))
     if (duplicate && origin === 'model') return d
     return update(d, [...d.items, item],origin)
+  })()
+}
+/** 一次提交多条候选：整份学习计划动辄十几条，逐条调用会耗尽轮次预算 */
+export function addItems(runId: string, inputs: DraftInput[], origin: DraftItem['origin'] = 'model'): TaskDraft {
+  if (!Array.isArray(inputs) || inputs.length < 1) throw new Error('请至少提交1条候选事项。')
+  if (inputs.length > 12) throw new Error('每次最多提交12条候选事项，请分批。')
+  return getDb().transaction(() => {
+    const d = ensureDraft(runId), items = [...d.items]
+    for (const input of inputs) {
+      const item = normalizeItem(input, undefined, origin)
+      const duplicate = items.find(i => fields.every(k => JSON.stringify(i[k as keyof DraftItem]) === JSON.stringify(item[k as keyof DraftItem])))
+      if (duplicate && origin === 'model') continue
+      items.push(item)
+    }
+    // 全部命中重复时不产生新版本，避免版本号空转让用户手里的卡片失效
+    return items.length === d.items.length ? d : update(d, items, origin)
   })()
 }
 export function patchItem(runId: string, draftId: string, version: number, itemId: string, input: DraftInput): TaskDraft {

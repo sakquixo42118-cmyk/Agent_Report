@@ -6,6 +6,7 @@ const KEY_MAP: Record<string, keyof AppSettings> = {
   ai_base_url: 'aiBaseUrl',
   ai_api_key: 'aiApiKey',
   ai_model: 'aiModel',
+  ocr_model: 'ocrModel',
   notify_enabled: 'notifyEnabled',
   notify_advance_hours: 'notifyAdvanceHours',
   lan_enabled: 'lanEnabled',

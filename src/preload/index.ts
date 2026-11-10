@@ -2,10 +2,11 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, type AppSettings, type Task, type TaskCreateInput, type TaskFilter, type TaskUpdateInput, type BatchCreateResult, type ChainGroup, type RebalanceResult } from '../shared/types'
 import { AGENT_IPC, type AgentRun, type RunSummary } from '../shared/agent'
 import { DRAFT_IPC, type TaskDraft, type DraftItem } from '../shared/drafts'
-import { PLANNING_IPC, type PlanningSnapshot, type CourseInput, type PlanningSettings, type PlanPreview, type CalendarExceptionInput, type DayOverride } from '../shared/planning'
+import { PLANNING_IPC, type PlanningSnapshot, type CourseInput, type CourseImportResult, type ManualSlots, type PlanningSettings, type PlanPreview, type CalendarExceptionInput, type DayOverride } from '../shared/planning'
 import { PROFILE_IPC, type MemoryFact, type MemoryInput, type DurationEstimate, type ProfileState, type CompletionDetail, type FeedbackInput } from '../shared/profile'
 import {STATISTICS_IPC,type StatisticsReport,type FrozenPlan,type PlanAuditInput} from '../shared/statistics'
 import {ATTENTION_IPC,type AttentionSettings,type AttentionState} from '../shared/attention'
+import { STUDY_IPC, type StudyDocument, type StudyOcrProgress, type StudyOcrResult, type StudyPickResult } from '../shared/study'
 
 const api = {
   attentionState:():Promise<AttentionState>=>ipcRenderer.invoke(ATTENTION_IPC.state),
@@ -49,12 +50,31 @@ const api = {
   dependencySave: (taskId: number, prerequisiteId: number, version: string): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.dependencySave,taskId,prerequisiteId,version),
   dependencyDelete: (taskId: number, prerequisiteId: number, version: string): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.dependencyDelete,taskId,prerequisiteId,version),
   courseSave: (input: CourseInput): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.saveCourse, input),
+  courseImport: (rows: CourseInput[]): Promise<CourseImportResult> => ipcRenderer.invoke(PLANNING_IPC.importCourses, rows),
   courseDelete: (id: number): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.deleteCourse, id),
   planningSettings: (input: PlanningSettings): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.settings, input),
   planningPreview: (ids: number[], start: string, end: string): Promise<PlanPreview> => ipcRenderer.invoke(PLANNING_IPC.preview, ids, start, end),
   planningCommit: (id: string,audit?:PlanAuditInput): Promise<{ saved: true; count: number }> => ipcRenderer.invoke(PLANNING_IPC.commit, id,audit),
+  planningFreeSlots: (taskId: number, start: string, end: string): Promise<ManualSlots> => ipcRenderer.invoke(PLANNING_IPC.freeSlots, taskId, start, end),
+  planningSaveBlock: (taskId: number, start: number, end: number,audit?:PlanAuditInput): Promise<{ id: number }> => ipcRenderer.invoke(PLANNING_IPC.saveBlock, taskId, start, end,audit),
   planningLock: (id: number, locked: boolean): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.lock, id, locked),
   planningRemove: (id: number): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.remove, id),
+  studyPick: (): Promise<StudyPickResult> => ipcRenderer.invoke(STUDY_IPC.pick),
+  studyList: (): Promise<StudyDocument[]> => ipcRenderer.invoke(STUDY_IPC.list),
+  studyParse: (id: string): Promise<StudyDocument> => ipcRenderer.invoke(STUDY_IPC.parse, id),
+  studyRemove: (id: string): Promise<void> => ipcRenderer.invoke(STUDY_IPC.remove, id),
+  studyOcr: (id: string, fromPage?: number, toPage?: number): Promise<StudyOcrResult> => ipcRenderer.invoke(STUDY_IPC.ocr, id, fromPage, toPage),
+  studyOcrCancel: (id: string): Promise<void> => ipcRenderer.invoke(STUDY_IPC.ocrCancel, id),
+  onStudyOcrProgress: (cb: (progress: StudyOcrProgress) => void): (() => void) => {
+    const listener = (_e: unknown, progress: StudyOcrProgress): void => cb(progress)
+    ipcRenderer.on(STUDY_IPC.ocrProgress, listener)
+    return () => ipcRenderer.removeListener(STUDY_IPC.ocrProgress, listener)
+  },
+  onStudyChanged: (cb: () => void): (() => void) => {
+    const listener = (): void => cb()
+    ipcRenderer.on(STUDY_IPC.changed, listener)
+    return () => ipcRenderer.removeListener(STUDY_IPC.changed, listener)
+  },
   agentStart: (goal: string): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.start, goal),
   agentSend: (id: string, text: string): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.send, id, text),
   agentLatest: (): Promise<AgentRun | null> => ipcRenderer.invoke(AGENT_IPC.latest),

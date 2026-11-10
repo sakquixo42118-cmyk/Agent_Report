@@ -173,7 +173,7 @@ async function remove(): Promise<void> {
     <label>截止时间（留空表示无截止）<input v-model="deadlineInput" type="datetime-local" /></label>
     <label>预计耗时（分钟）<input v-model.number="estimateInput" type="number" min="5" max="1440" step="5" /></label>
     <label>估时分组（同类任务一起校准）<input v-model="estimateGroup" maxlength="60" placeholder="例如：数学分析" /></label>
-    <span>执行时间请在日程或今日助理中试排，修改执行安排不会修改此截止。</span>
+    <span>执行时间到“日程”里自己挑空档，或让“助理”试排；改执行安排不会改此截止。</span>
     <p v-if="timingError" role="alert">{{ timingError }}</p>
     <button class="act" :disabled="timingBusy" @click="saveTiming">确认时间信息</button>
   </div>

@@ -5,6 +5,7 @@ import { runMigrations } from '../src/main/db/migrations'
 import * as tasks from '../src/main/db/taskDao'
 import * as planning from '../src/main/planning/service'
 import { at, day, daysBetween, overlaps, subtract, trial, dateKey } from '../src/main/planning/engine'
+import { parseTimetable } from '../src/shared/timetable'
 import { executeTool } from '../src/main/agent/tools'
 import { drive, confirmChange } from '../src/main/agent/runner'
 import * as store from '../src/main/agent/store'
@@ -52,6 +53,67 @@ export async function planningTests(test: Test): Promise<void> {
     assert.throws(() => planning.saveCourse({ name: '坏课程', weekday: 0, startMin: 540, endMin: 660, fromDate: date, toDate: next }))
     assert.throws(() => planning.saveSettings({ ...defaults, startMin: 900, endMin: 800 }))
   })
+  await test('课表文本解析：多种写法、默认生效范围与错误行', () => {
+    const r = parseTimetable([
+      '# 注释行会被忽略',
+      '数学分析, 周一, 08:00-09:40',
+      '数据结构\t周二\t14:00-15:40',
+      '英语视听说 周三 10:00-11:40',
+      '概率论, 星期四, 08:00~09:40, 2030-01-07~2030-02-01',
+      '',
+      '这一行没有时间',
+      '体测, 周八, 10:00-11:00'
+    ].join('\n'), date, next)
+    assert.equal(r.rows.length, 4)
+    assert.deepEqual(r.rows[0], { name: '数学分析', weekday: 1, startMin: 480, endMin: 580, fromDate: date, toDate: next })
+    assert.deepEqual([r.rows[1].weekday, r.rows[1].startMin], [2, 840])
+    assert.deepEqual([r.rows[2].weekday, r.rows[2].name], [3, '英语视听说'])
+    assert.deepEqual([r.rows[3].fromDate, r.rows[3].toDate], ['2030-01-07', '2030-02-01'])
+    assert.deepEqual(r.issues.map(i => i.line), [7, 8])
+  })
+  await test('批量导入课表：跳过重复、重叠只提示、拒绝空批次', () => {
+    reset()
+    const rows = parseTimetable('数学分析, 周一, 08:00-09:40\n数学分析, 周一, 08:00-09:40\n高等代数, 周一, 09:00-10:40', date, next).rows
+    const first = planning.importCourses(rows)
+    assert.deepEqual([first.added, first.skipped], [2, 1])
+    assert.equal(first.warnings.length, 1)
+    assert.ok(first.warnings[0].includes('高等代数') && first.warnings[0].includes('数学分析'))
+    assert.equal(planning.listCourses().length, 2)
+    assert.deepEqual(planning.importCourses(rows.slice(0, 1)), { added: 0, skipped: 1, warnings: [] })
+    assert.throws(() => planning.importCourses([]))
+    assert.throws(() => planning.importCourses([{ name: '', weekday: 1, startMin: 480, endMin: 580, fromDate: date, toDate: next }]))
+  })
+
+  await test('手动选时段：空档排除课程与已有安排，保存按移动处理', () => {
+    reset(); course(540, 660); const id = task(60)
+    const slots = planning.manualSlots(id, date, date, now)
+    assert.equal(slots.durationMin, 60)
+    assert.equal(slots.days.length, 1)
+    assert.deepEqual(slots.days[0].candidates.map(c => [c.start, c.end]), [[at(date, 480), at(date, 540)], [at(date, 660), at(date, 960)]])
+    assert.ok(slots.days[0].candidates.every(c => c.fits))
+    // 与课程重叠、超出窗口、时长为0、过去时间都要挡掉
+    assert.throws(() => planning.saveBlockAt(id, at(date, 570), at(date, 630), now))
+    assert.throws(() => planning.saveBlockAt(id, at(date, 900), at(date, 1000), now))
+    assert.throws(() => planning.saveBlockAt(id, at(date, 660), at(date, 660), now))
+    assert.throws(() => planning.saveBlockAt(id, at(date, 660), at(date, 720), at(date, 800)))
+    const saved = planning.saveBlockAt(id, at(date, 480), at(date, 540), now)
+    assert.ok(saved.id > 0)
+    assert.equal(planning.listBlocks().length, 1)
+    // 移动自己时释放自己的旧块；课程与其他任务仍作为占用，不能把自己也当成阻塞。
+    const after = planning.manualSlots(id, date, date, now).days[0]
+    assert.deepEqual(after.candidates.map(c => [c.start, c.end]), [[at(date,480),at(date,540)],[at(date, 660), at(date, 960)]])
+    // 挪动自己的安排不算冲突，且仍只保留一条
+    planning.saveBlockAt(id, at(date, 660), at(date, 720), now)
+    assert.equal(planning.listBlocks().length, 1)
+    assert.throws(() => planning.saveBlockAt(id, at(date, 660), at(date, 700), now))
+  })
+  await test('手动选时段：截止之后的空档不出现', () => {
+    reset(); const id = task(60, new Date(at(date, 600)).toISOString())
+    const day = planning.manualSlots(id, date, date, now).days[0]
+    assert.deepEqual(day.candidates.map(c => [c.start, c.end, c.fits]), [[at(date, 480), at(date, 600), true]])
+    assert.throws(() => planning.saveBlockAt(id, at(date, 660), at(date, 720), now))
+  })
+
   await test('避开课程，为长任务选择连续足够的空档', () => {
     reset(); course(540, 660); const id = task(120, new Date(at(date, 900)).toISOString())
     const p = planning.preview([id], date, date, null, now)

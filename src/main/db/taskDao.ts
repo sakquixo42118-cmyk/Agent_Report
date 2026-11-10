@@ -412,7 +412,7 @@ function invalidateCompletions(id: number): void {
 
 /** 推迟到明天：due_at = 明天（保持时间部分），无截止则明天 23:59；snooze_count+1 */
 export function snoozeTask(id: number): { task: Task; chained: number } | null {
-  throw new Error('旧按天推迟已停用，请在今日助理试排明天的执行时段；截止时间不会随之改变。')
+  throw new Error('旧按天推迟已停用，请在助理页试排明天的执行时段；截止时间不会随之改变。')
 }
 
 /**
