@@ -29,6 +29,8 @@ import { statisticsTests } from './statistics.test'
 import * as statistics from '../src/main/statistics/service'
 import {attentionTests} from './attention.test'
 import {integrationTests} from './integration.test'
+import {hardeningTests} from './hardening.test'
+import {hardeningLiveTests} from './hardening-live.test'
 import * as attention from '../src/main/attention/service'
 import {startAttention,stopAttention,processAttention} from '../src/main/attention/worker'
 import * as drafts from '../src/main/drafts/service'
@@ -290,12 +292,14 @@ app.whenReady().then(async () => {
     await attentionTests(test)
     await studyTests(test)
     await integrationTests(test)
+    await hardeningTests(test)
     if (process.argv.includes('--live')) {
       const keyFile = process.env.AGENT_TEST_KEY_FILE
       if (!keyFile) throw new Error('真实验证需要AGENT_TEST_KEY_FILE。')
       const key = readFileSync(keyFile, 'utf8').match(/sk-[A-Za-z0-9_.-]+/)?.[0]
       if (!key) throw new Error('未读到凭据。')
       setSettings({ aiBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', aiApiKey: key, aiModel: 'qwen-plus' })
+      if(!process.argv.includes('--hardening-live')) {
       if (!process.argv.includes('--profile-live')&&!process.argv.includes('--capture-live')&&!process.argv.includes('--scheduling-live')&&!process.argv.includes('--statistics-live')&&!process.argv.includes('--attention-live')) {
       await test('真实千问原生工具查询并回传结果', async () => {
         const run = create('请查询当前未完成任务，只列出任务名，不修改数据。')
@@ -448,13 +452,13 @@ app.whenReady().then(async () => {
         const id=seed('S6真实统计验证');tasks.updateTask({id,estimateMin:60,estimateGroup:'S6真实统计',deadlineAt:null});tasks.completeTask(id,true)
         const event=feedback.completionForTask(id)!.event
         feedback.submitFeedback({eventId:event.id,actualMin:90,difficulty:'fit',interrupted:false,scopeChanged:false,note:'合成统计样本'})
-        const expected=statistics.readStatistics();assert.equal(expected.completedTasks,1);assert.equal(expected.estimates.baseMape,50);assert.equal(expected.currentBaseline,null)
+        const expected=statistics.readStatistics();assert.equal(expected.completedTasks,1);assert.ok(Math.abs(expected.estimates.baseMape!-100/3)<1e-9);assert.equal(expected.currentBaseline,null)
         const count=(db.prepare('SELECT COUNT(*) AS n FROM task_events').get() as {n:number}).n
         const run=create('请用get_statistics读取今天的记录，只告诉我近7日完成多少项、原始估时MAPE是多少、今日冻结计划完成率是否可计算。不要创建或修改任务，不把未冻结说成0%或100%。')
         await drive(run);const result=store.getRun(run);assert.equal(result.status,'completed',JSON.stringify(result.events))
         assert.ok(result.events.some(e=>e.kind==='tool'&&e.text.includes('get_statistics')))
         const answer=result.events.filter(e=>e.kind==='assistant').map(e=>e.text).join('\n')
-        assert.match(answer,/1/);assert.match(answer,/50/);assert.match(answer,/未冻结|(?:没有|暂无|无).*基线|尚未.*(?:冻结|基线)/)
+        assert.match(answer,/1/);assert.match(answer,/33/);assert.match(answer,/未冻结|(?:没有|暂无|无).*基线|尚未.*(?:冻结|基线)/)
         assert.doesNotMatch(answer,/coverage|部分计划/)
         assert.equal((db.prepare('SELECT COUNT(*) AS n FROM task_events').get() as {n:number}).n,count)
         assert.equal((db.prepare('SELECT COUNT(*) AS n FROM day_plan_snapshots').get() as {n:number}).n,0)
@@ -489,7 +493,9 @@ app.whenReady().then(async () => {
         console.log(`LIVE attention risk decision=${row.status}`);stopAttention()
       })
       }
-      // 测试库退出后清空密钥，日志从不打印凭据。
+      }
+      if(!process.argv.some(a=>['--profile-live','--capture-live','--scheduling-live','--statistics-live','--attention-live'].includes(a)))await hardeningLiveTests(test)
+      // 所有真实调用结束后清空密钥，日志从不打印凭据。
       setSettings({ aiApiKey: '' })
     }
     console.log(`RESULT ${passed} passed; isolated database only; mode=${process.argv.includes('--live') ? 'mock+live' : 'mock'}`)

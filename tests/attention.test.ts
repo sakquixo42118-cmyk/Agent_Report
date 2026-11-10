@@ -14,6 +14,7 @@ import * as store from '../src/main/agent/store'
 import * as drafts from '../src/main/drafts/service'
 import {processNext} from '../src/main/feedback/worker'
 import type {ModelMessage,ModelTransport} from '../src/main/agent/model'
+import {deadlineClock,relativeTimeIssue} from '../src/main/attention/timeEvidence'
 type Test=(name:string,fn:()=>unknown|Promise<unknown>)=>Promise<void>
 export async function attentionTests(test:Test):Promise<void>{
   const db=getDb(),date='2030-01-07',now=at(date,720),ids:number[]=[];let serial=0
@@ -31,6 +32,21 @@ export async function attentionTests(test:Test):Promise<void>{
   function model(mode:'silent'|'ask'|'suggest'='ask'):ModelTransport{let step=0,keys:string[]=[];return async(_s,m)=>{if(step++===0)return call('get_attention_context',{});keys=JSON.parse(m.at(-1)!.content!).evidence.map((e:{key:string})=>e.key);return call('respond',{mode,text:mode==='silent'?'':'按当前记录，有需要核对或补充的事项吗？',eventKeys:mode==='silent'?[]:keys})}}
   const run=(mode:'silent'|'ask'|'suggest'='ask',time=now)=>processAttention(model(mode),()=>time)
   const state=(time=now)=>service.attentionState(time)
+  await test('倒计时按实际截止计算，不复述标题；预计剩余工作量不被当成截止',()=>{
+    reset();const id=task('标题中的12分钟不会更新',now+15*60000),e=service.candidates(now).find(e=>e.taskId===id)!
+    assert.equal(deadlineClock(e,now).deadlineRemainingMin,15)
+    assert.ok(relativeTimeIssue('12分钟后截止',[e],now))
+    assert.equal(relativeTimeIssue('距离截止还有15分钟',[e],now),null)
+    assert.equal(relativeTimeIssue('还有5分钟就能完成报告',[e],now),null)
+    assert.ok(relativeTimeIssue('还有0分钟截止',[e],now+15*60000+1))
+  })
+  await test('后台拒绝不实倒计时后模型可同轮纠正，不发布错误催办',async()=>{
+    reset();const id=task('模拟12分钟标题',now+15*60000),key=service.candidates(now).find(e=>e.taskId===id)!.key;let step=0
+    const transport:ModelTransport=async(_s,m)=>{if(step++===0)return call('get_attention_context',{});if(step===2)return call('respond',{mode:'suggest',text:'12分钟后截止，现在提交吗？',eventKeys:[key]});assert.match(m.at(-1)!.content!,/RELATIVE_TIME_MISMATCH/);return call('respond',{mode:'suggest',text:'截止临近，可以核对提交状态。',eventKeys:[key]})}
+    assert.equal(await processAttention(transport,()=>now),true)
+    assert.equal(state().messages.length,1);assert.doesNotMatch(state().messages[0].text,/12分钟/)
+    const job=db.prepare('SELECT trace_json FROM attention_jobs ORDER BY rowid DESC LIMIT 1').get() as {trace_json:string};assert.match(job.trace_json,/RELATIVE_TIME_MISMATCH/)
+  })
   await test('近期课程实例可检查；首次启用前、旧课程和停课不补问',()=>{
     reset();const c=course();assert.equal(service.candidates(now).filter(e=>e.kind==='course').length,1)
     db.prepare('UPDATE attention_state SET enabled_at=?').run(now);assert.equal(service.candidates(now).length,0)

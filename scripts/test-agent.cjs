@@ -9,6 +9,6 @@ require('esbuild').buildSync({ entryPoints: [path.join(root, 'tests', 'agent.tes
   alias: { '@shared': path.join(root, 'src', 'shared') }, tsconfig: path.join(root, 'tsconfig.node.json') })
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
-const result = spawnSync(require('electron'), [output, ...process.argv.slice(2)], { cwd: root, env, stdio: 'inherit', timeout: 300000 })
+const result = spawnSync(require('electron'), [output, ...process.argv.slice(2)], { cwd: root, env, stdio: 'inherit', timeout: process.argv.includes('--live') ? 600000 : 300000 })
 if (result.error) console.error(result.error.message)
 process.exit(result.status ?? 1)

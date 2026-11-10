@@ -38,6 +38,10 @@ export function removeFact(id: string, version: number): void {
   if (typeof id !== 'string' || !Number.isInteger(version)) throw new Error('记忆参数无效。')
   if (!getDb().prepare('DELETE FROM memory_facts WHERE id=? AND version=?').run(id, version).changes) throw new Error('记忆已变化，请刷新。')
 }
+export function memoryTopics(now = Date.now()): { scope: string; key: string }[] {
+  return getDb().prepare(`SELECT scope,key FROM memory_facts WHERE expires_at IS NULL OR expires_at>? ORDER BY updated_at DESC,id LIMIT 12`)
+    .all(new Date(now).toISOString()) as { scope: string; key: string }[]
+}
 export function searchMemory(query: string, scope?: string, limit = 5, now = Date.now()): object[] {
   if (typeof query !== 'string' || !query.trim() || query.length > 100 || !Number.isInteger(limit) || limit < 1 || limit > 5 || (scope !== undefined && (typeof scope !== 'string' || scope.length > 60))) throw new Error('检索参数无效。')
   const q = scopeKey(query), words = q.match(/[a-z0-9]+|[\u4e00-\u9fff]+/g) ?? []

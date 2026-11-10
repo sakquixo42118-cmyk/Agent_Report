@@ -126,12 +126,14 @@ async function startOcr(): Promise<void> {
       : (res.cancelled
         ? `已取消：本次识别 ${res.recognized} 页，跳过 ${res.skipped} 页已有内容；已完成的部分已保存。`
         : `识别完成：《${res.document.name}》已识别 ${res.document.recognizedPages}/${res.document.pageCount} 页 / ${res.document.charCount.toLocaleString('zh-CN')} 字（本次 ${res.recognized} 页，跳过 ${res.skipped} 页）`) + head
-    if (res.document.ocrState !== 'failed' && !res.cancelled && res.recognized > 0 && to < task.pageCount) {
+    notice.value = ocrMessage.value
+    if (res.document.ocrState !== 'failed' && res.document.firstMissingPage !== null) {
       // 大文件分段识别：保留卡片并把范围推进到下一段，免得每段都要重新选文件
-      ocrFrom.value = to + 1
-      ocrTo.value = Math.min(task.pageCount, to + OCR_DEFAULT_PAGES)
-      ocrMessage.value += `\n还有 ${task.pageCount - to} 页未识别，可继续下一段。`
-    } else {
+      ocrFrom.value = res.document.firstMissingPage
+      ocrTo.value = Math.min(task.pageCount, ocrFrom.value + OCR_DEFAULT_PAGES - 1)
+      ocrMessage.value += `\n仍有未识别页，可从第${ocrFrom.value}页继续。`
+      notice.value = ocrMessage.value
+    } else if (res.document.ocrState !== 'failed' && !res.cancelled) {
       ocrQueue.value = ocrQueue.value.slice(1)
       resetRange(ocrTask.value)
     }
@@ -226,6 +228,7 @@ onUnmounted(() => { removeListener?.(); removeOcrListener?.() })
       <div class="proposal-actions"><button class="primary" :disabled="busy" @click="confirm(true)">{{ memory ? '确认保存记忆' : plan ? '确认保存计划' : '确认调整' }}</button><button class="small" :disabled="busy" @click="confirm(false)">放弃</button></div>
     </div>
     <p v-if="notice" class="chat-note">{{ notice }}</p>
+    <p v-if="notice.includes('识别完成')" class="chat-hint">公式与代码符号请对照原页核对。</p>
     <section v-if="ocrTask" class="ocr-card" aria-live="polite">
       <p class="ocr-head">《{{ ocrTask.name }}》共 {{ ocrTask.pageCount }} 页<template v-if="ocrFrom > 1">，已有 {{ ocrFrom - 1 }} 页有文字</template>，其余页没有文字层，识别后才能分析</p>
       <div class="ocr-range">

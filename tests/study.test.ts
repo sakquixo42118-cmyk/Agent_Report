@@ -353,6 +353,24 @@ export async function studyTests(test: Test): Promise<void> {
     assert.equal(ocr.countRecognizedPages(doc.id), 3)
   })
 
+  await test('识别中取消保留已经完成的页，重试只补未完成页', async () => {
+    const doc = await study.registerFile(write('cancel-5p.pdf', inkedPdf(5))); created.push(doc.id); await study.parseDocument(doc.id)
+    let calls = 0
+    const first = await ocr.ocrDocument(doc.id, { transcribe: async (_image, page) => { if (++calls === 1) ocr.cancelOcr(doc.id); return `取消前已识别的第${page}页正文` } })
+    assert.equal(first.cancelled, true);assert.ok(first.recognized > 0 && first.recognized < 5)
+    const cached = ocr.listOcrPages(doc.id).map(p => p.page), visited: number[] = []
+    const second = await ocr.ocrDocument(doc.id, { transcribe: async (_image, page) => { visited.push(page); return `恢复后识别的第${page}页正文` } })
+    assert.equal(second.skipped,cached.length);assert.equal(second.document.recognizedPages,5)
+    assert.ok(visited.every(page=>!cached.includes(page)));assert.equal(second.document.firstMissingPage,null)
+  })
+  await test('单页接口失败保留其他页，缺页可定位并在重试时独立补齐', async () => {
+    const doc = await study.registerFile(write('partial-3p.pdf', inkedPdf(3))); created.push(doc.id); await study.parseDocument(doc.id)
+    const first = await ocr.ocrDocument(doc.id, { transcribe: async (_image, page) => { if(page===2)throw Error('429 模拟限流');return `已识别第${page}页正文` } })
+    assert.equal(first.document.recognizedPages,2);assert.equal(first.document.firstMissingPage,2)
+    const visited:number[]=[]
+    const second=await ocr.ocrDocument(doc.id,{transcribe:async(_image,page)=>{visited.push(page);return `已恢复第${page}页正文`}})
+    assert.deepEqual(visited,[2]);assert.equal(second.skipped,2);assert.equal(second.document.firstMissingPage,null)
+  })
   await test('JPEG2000 扫描件能解码渲染（守护 wasmUrl）', async () => {
     const j2k = readFileSync(join(process.cwd(), 'tests', 'fixtures', 'sample-jpx.j2k'))
     const file = write('scan-jpx.pdf', jpxPdf(j2k))

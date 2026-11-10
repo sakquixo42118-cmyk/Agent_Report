@@ -69,8 +69,8 @@ export function readStatistics(endDate=dateKey(Date.now()),now=Date.now()):Stati
   const eligible=completions.filter(c=>c.deadline_confirmed===1&&c.deadline_at)
   const onTime=eligible.filter(c=>new Date(c.created_at).getTime()<=new Date(c.deadline_at!).getTime())
   const samples=completions.filter(c=>c.actual_min!==null&&Number.isFinite(c.actual_min)&&c.actual_min>0&&c.base_min>0&&c.planned_min>0&&c.interrupted===0&&c.scope_changed===0)
-  const baseError=(c:CompletionRow):number=>Math.abs(c.actual_min!-c.base_min)/c.base_min*100
-  const plannedError=(c:CompletionRow):number=>Math.abs(c.actual_min!-c.planned_min)/c.planned_min*100
+  const baseError=(c:CompletionRow):number=>Math.abs(c.actual_min!-c.base_min)/c.actual_min!*100
+  const plannedError=(c:CompletionRow):number=>Math.abs(c.actual_min!-c.planned_min)/c.actual_min!*100
   const groups:StatisticsReport['estimates']['groups']=[]
   for(const key of new Set(samples.map(c=>JSON.stringify([c.group_key,c.estimate_source])))){
     const [group,source]=JSON.parse(key),rows=samples.filter(c=>c.group_key===group&&c.estimate_source===source)

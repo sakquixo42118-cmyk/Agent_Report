@@ -142,7 +142,7 @@ export async function statisticsTests(test:Test):Promise<void>{
   })
   await test('耗时误差按有效样本手算，原始/计划时长和来源分组独立',()=>{
     reset();const a=task('用户样本',60),b=task('模型样本',60,'model');plan([a]);let event=complete(a);sample(event,90)
-    event=complete(b);sample(event,30);const r=report();assert.equal(r.estimates.sampleCount,2);assert.equal(r.estimates.baseMape,50);assert.equal(r.estimates.plannedMape,50);assert.equal(r.estimates.meanAbsoluteMin,30);assert.equal(r.estimates.groups.length,2)
+    event=complete(b);sample(event,30);const r=report();assert.equal(r.estimates.sampleCount,2);assert.ok(Math.abs(r.estimates.baseMape!-200/3)<1e-9);assert.ok(Math.abs(r.estimates.plannedMape!-200/3)<1e-9);assert.equal(r.estimates.meanAbsoluteMin,30);assert.equal(r.estimates.groups.length,2)
   })
   await test('缺耗时、中断、范围变化均排除；后补有效反馈才加入',()=>{
     reset();const ids=['缺失','中断','范围'].map(name=>task(name)),events=ids.map(id=>complete(id));sample(events[0],null);sample(events[1],90,true);sample(events[2],90,false,true)

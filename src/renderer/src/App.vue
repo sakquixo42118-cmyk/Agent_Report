@@ -96,7 +96,7 @@ function provideToast(): void {
           <span v-if="n.key==='today' && totalUnread" class="unread-badge" :aria-label="totalUnread+'条未读消息'">{{ totalUnread }}</span>
         </button>
       </nav>
-      <div class="sidebar-footer">v0.2 α8 · 协作集成</div>
+      <div class="sidebar-footer">v0.2 α9 · 答辩补测</div>
     </aside>
 
     <main class="main">

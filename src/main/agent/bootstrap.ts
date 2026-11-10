@@ -3,7 +3,7 @@ import './draftTools'
 import './confirmations'
 import { registerScene } from './registry'
 const studyTools=['get_study_documents','read_study_pages']
-const common=['respond','ask_user','finish_reply','search_memory','get_feedback_history','estimate_duration','list_tasks','get_task',...studyTools]
+const common=['respond','ask_user','ask_task_selection','resolve_date','finish_reply','search_memory','get_feedback_history','estimate_duration','list_tasks','get_task',...studyTools]
 const draftTools=['get_input_source','create_task_draft','create_task_drafts','get_task_draft','update_task_draft','propose_task_draft']
 const captureInstructions=`此场景用于事项录入或修订导入草案。自主判断信息是否足够，可查输入来源、个人记忆或询问；不要固定逐字段问卷。
 信息充分时直接建立草案；含糊目标如“学完第三章”先区分初学/复习、阅读/习题等真正影响耗时的范围。已有确认记忆能解决的问题不重复问。

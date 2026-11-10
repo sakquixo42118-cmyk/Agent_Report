@@ -10,23 +10,26 @@ import { listForAgent, readForAgent } from '../study/reader'
 import { registerTool } from './registry'
 import {readStatistics} from '../statistics/service'
 import type { ToolContext, ToolResult } from './contracts'
+import { resolveDate, unsupportedMemoryTimes } from './grounding'
 export type { ToolContext, ToolResult } from './contracts'
 
 type Field = { type: 'string' | 'integer' | 'array'; description?: string; enum?: string[]; minimum?: number; maximum?: number; maxLength?: number; items?: object; minItems?: number; maxItems?: number }
 interface Spec { name: string; description: string; fields: Record<string, Field>; required: string[] }
 const specs: Spec[] = [
+  { name: 'resolve_date', description: '用本地日历解析今天/明天/这周四/下周四等日期，返回准确年月日、星期与时区；星期有歧义或与明确日期冲突会要求澄清。不要凭记忆猜星期对应日期。', fields: { expression: { type: 'string', maxLength: 60 } }, required: ['expression'] },
+  { name: 'ask_task_selection', description: '让用户从真实已查询任务中选择。先list_tasks取得真实ID，再传2—4个taskIds；按钮名称由程序从数据库生成，不由模型编写。不会修改任务。', fields: { question: { type: 'string', maxLength: 500 }, taskIds: { type: 'array', items: { type: 'integer', minimum: 1 }, minItems: 2, maxItems: 4 } }, required: ['question', 'taskIds'] },
   {name:'get_statistics',description:'读取本地已记录的近7日完成、冻结计划完成率、主动推迟与估时误差。旧历史未启用、未冻结或无样本会返回未知/空，不是零表现。仅明确标记主动推迟的操作才算主动延期；不从改期推断性格或原因。只读，不改变基线。',fields:{endDate:{type:'string',maxLength:10,description:'可选，YYYY-MM-DD，不能晚于今天。'}},required:[]},
-  { name: 'search_memory', description: '按当前目标检索相关的用户确认记忆。可按估时分组scope筛选（并包含相关全局记忆），最多5条；无命中如实为空。记忆有来源/版本/有效期，本次明确要求优先。', fields: {
+  { name: 'search_memory', description: '按当前目标检索用户确认记忆，最多5条。无命中或分组未知时返回最多12个可用主题的分组/名称（不含事实正文），据此改用值班、偏好、可用时间等相关关键词重查；一次空结果不表示没有相关事实。scope用保存时原文。本次要求优先。', fields: {
     query: { type: 'string', maxLength: 100 }, scope: { type: 'string', maxLength: 60, description: '可选，使用实际分组原文如“数学分析”或“全局”，不要加course:等前缀；不知道真实分组时省略。' }, limit: { type: 'integer', minimum: 1, maximum: 5 }
   }, required: ['query'] },
   { name: 'estimate_duration', description: '读取真实任务的分组、原始估时和个人历史样本校准。只知道名称时先list_tasks按关键词取得真实taskId，不猜测或使用示例ID。不会改变已有计划或反复乘系数；试排会使用同一结果。', fields: { taskId: { type: 'integer', minimum: 1 } }, required: ['taskId'] },
   { name: 'get_feedback_history', description: '读取指定估时分组最近最多5条有效完成反馈及用户补充，属于单次执行证据，不等同长期画像。撤销完成的记录不返回。', fields: { scope: { type: 'string', maxLength: 60 }, limit: { type: 'integer', minimum: 1, maximum: 5 } }, required: ['scope'] },
-  { name: 'propose_memory', description: '提出长期记忆草案，用户确认后保存。分组scope可为全局或课程/估时分组；单次反馈不要直接泛化。更新现有记忆时预览原值。', fields: {
+  { name: 'propose_memory', description: '提出长期记忆草案，用户确认后保存。只保留用户给出或已读取的事实，不新增具体钟点、日期或偏好；例如上午第一节不能猜成08:00。分组scope可为全局或课程名；单次反馈不直接泛化。', fields: {
     scope: { type: 'string', maxLength: 60 }, key: { type: 'string', maxLength: 60 }, value: { type: 'string', maxLength: 800 }, expiresAt: { type: 'string', maxLength: 50, description: '可选ISO有效期，空字符串表示无到期时间。' }
   }, required: ['scope', 'key', 'value'] },
   { name: 'respond', description: '向用户展示本轮完整答复。text必须自包含，其他assistant content不会展示；查到事实后须在text中回答原问题，不能只问是否要继续规划。mode=question仅在确需补充信息时等待回答，可同时给出2—4个候选答复供点选；事实已足够用mode=answer结束。不能声称未提交操作已保存。', fields: {
     mode: { type: 'string', enum: ['question', 'answer'] }, text: { type: 'string', maxLength: 3000 },
-    options: { type: 'array', items: { type: 'string', maxLength: 30 }, maxItems: 4, description: '仅mode=question时使用：2—4个互斥的短候选答复，用户可点选也可自己输入。' }
+    options: { type: 'array', items: { type: 'string', maxLength: 30 }, maxItems: 4, description: '仅mode=question使用已核实候选或泛化动作；不确定就省略，不为凑数量编造任务名。选择任务应调用ask_task_selection。' }
   }, required: ['mode', 'text'] },
   { name: 'get_calendar', description: '读取最多7天的课程、停补课/临时占用、单日正常或轻量设置、有效容量、显式任务依赖和已有执行计划。effectiveDays是各日真实设置；日期格式YYYY-MM-DD。', fields: { startDate: { type: 'string', maxLength: 10 }, endDate: { type: 'string', maxLength: 10 } }, required: ['startDate', 'endDate'] },
   { name: 'get_free_slots', description: '计算日期范围内避开课程、已有安排和休息后的空档及每日剩余容量；空档不是已保存安排。', fields: { startDate: { type: 'string', maxLength: 10 }, endDate: { type: 'string', maxLength: 10 } }, required: ['startDate', 'endDate'] },
@@ -42,7 +45,7 @@ const specs: Spec[] = [
   { name: 'propose_priority_change', description: '提出重要度/紧急度修改草案，必须使用刚读取的ID和updatedAt。不会立即写入；用户点击确认后应用。至少指定一种评分。',
     fields: { taskId: { type: 'integer', minimum: 1 }, importance: { type: 'integer', minimum: 1, maximum: 5 }, urgency: { type: 'integer', minimum: 1, maximum: 5 },
       expectedUpdatedAt: { type: 'string', maxLength: 60 }, reason: { type: 'string', maxLength: 200 } }, required: ['taskId', 'expectedUpdatedAt', 'reason'] },
-  { name: 'ask_user', description: '信息不足或任务指代有歧义时向用户提出一个简短问题，保存并等待回复；信息充分时不必调用。提问应给出2—4个互斥的短选项（options），用户可点选也可自己输入；只有确实无法枚举答案时才省略options。一次只问一个关键问题，能在选项里写清的细节不要留成第二个问句。',
+  { name: 'ask_user', description: '信息不足时提出一个简短问题并等待回复；信息充分不必提问。options仅用于已核实候选或泛化动作，无法列举时省略；不为凑选项虚构任务。让用户选择真实任务时使用ask_task_selection。一次只问一个关键问题。',
     fields: { question: { type: 'string', maxLength: 500 },
       options: { type: 'array', items: { type: 'string', maxLength: 30 }, maxItems: 4, description: '可选，2—4个互斥的短候选答复（每个不超过20字），按最可能到最不可能排序。' } }, required: ['question'] },
   { name: 'get_study_documents', description: '列出用户已添加的教材/试卷，含总页数、已识别页数与字数。分析考点或按教材安排学习前先调用；没有资料、或可读页少于总页数时如实说明，不要编造章节与页码。', fields: {}, required: [] },
@@ -57,7 +60,7 @@ export const toolDefinitions: ToolDefinition[] = specs.map(s => ({ type: 'functi
   parameters: { type: 'object', properties: s.fields, required: s.required, additionalProperties: false }
 } }))
 for (const definition of toolDefinitions) registerTool({ definition,
-  effect: definition.function.name.startsWith('propose_') ? 'propose' : ['ask_user','respond','finish_reply'].includes(definition.function.name) ? 'respond' : 'read',
+  effect: definition.function.name.startsWith('propose_') ? 'propose' : ['ask_user','ask_task_selection','respond','finish_reply'].includes(definition.function.name) ? 'respond' : 'read',
   execute: (args, context) => executeTool(definition.function.name, JSON.stringify(args), context) })
 
 function fail(errorCode: string, message: string): ToolResult { return { ok: false, errorCode, message } }
@@ -113,23 +116,36 @@ export function executeTool(name: string, raw: string, context: ToolContext): To
     if (spec.required.includes(key) && typeof value === 'string' && !value.trim()) return fail('INVALID_ARGUMENTS', `${key}不能为空。`)
   }
   try {
+    if (name === 'resolve_date') {
+      try { const date = resolveDate(String(args.expression)); return { ok: true, data: date, sourceRefs: [`calendar-date:${date.baseDate}:${date.date}`] } }
+      catch (e) { return fail('DATE_NEEDS_CLARIFICATION', e instanceof Error ? e.message : '日期需要澄清。') }
+    }
+    if (name === 'ask_task_selection') {
+      const selected = (args.taskIds as number[]).map(id => tasks.getTaskById(id))
+      if (selected.some(t => !t || t.status === 'archived')) return fail('NOT_FOUND', '候选任务已不存在，请重新查询。')
+      if (selected.some(t => context.observed.get(t!.id) !== t!.updatedAt)) return fail('READ_REQUIRED', '先读取本轮中这些任务的最新状态，再让用户选择。')
+      return { ok: true, data: { question: args.question, options: selected.map(t => `任务#${t!.id} ${(t!.summary || t!.content).slice(0, 20)}`), tasks: selected.map(t => ({ taskId: t!.id, title: t!.summary || t!.content })) }, pause: 'waiting_user', sourceRefs: selected.map(t => `task:${t!.id}`) }
+    }
     if(name==='get_statistics'){
       const r=readStatistics(args.endDate as string|undefined)
       return{ok:true,data:{startDate:r.startDate,endDate:r.endDate,enabledAt:r.enabledAt,timeZone:r.timeZone,completedTasks:r.completedTasks,
-        onTime:r.onTime,changes:r.changes,estimates:r.estimates,days:r.days.map(d=>({date:d.date,coverage:d.coverage,completed:d.completed,postponed:d.postponed,
+        onTime:r.onTime,changes:r.changes,estimates:r.estimates,days:r.days.map(d=>({date:d.date,recordingStatus:{none:'启用前没有记录',partial:'当日中途启用',full:'已启用记录'}[d.coverage],completed:d.completed,postponed:d.postponed,
           baseline:d.baseline?{denominator:d.baseline.denominator,completed:d.baseline.completed,rate:d.baseline.rate,added:d.baseline.addedTaskIds.length}:null})),
         definitions:{baseline:'baseline=null表示该日没有冻结基线，计划完成率不可计算。非空时为首次确认冻结的任务集合；后加不扩分母，移出/归档不缩分母',
-          coverage:'none=统计启用前；partial=当日中途启用，只记录启用后的时段；full=当日已启用。coverage描述记录时间范围，与是否冻结完全不同，partial不表示有部分计划或部分冻结。',
-          postpone:'用户明确选择主动推迟且开始时间后移的执行改期',estimate:'有效耗时反馈的平均绝对百分比误差，原始和计划时长分别计算'}},sourceRefs:[`statistics:${r.startDate}:${r.endDate}`]}
+          recordingStatus:'只描述记录的起始时间，不表示已冻结计划。回答完成率时以是否有冻结基线为准，不必复述内部字段或主动解释记录范围。',
+          postpone:'用户明确选择主动推迟且开始时间后移的执行改期',estimate:'MAPE=平均(|预计分钟-实际专注分钟|/实际专注分钟)×100%，仅有效正耗时反馈；原始和计划时长分别计算'}},sourceRefs:[`statistics:${r.startDate}:${r.endDate}`]}
     }
     if (name === 'get_feedback_history') return { ok: true, data: { records: memory.recentFeedback(String(args.scope), Number(args.limit ?? 5)) } }
     if (name === 'search_memory') {
-      if (args.scope !== undefined && !memory.hasScope(String(args.scope))) return fail('UNKNOWN_MEMORY_SCOPE', '没有这个记忆分组。scope需使用保存时的原文，不要加course:等前缀；请省略scope按关键词重查，不要据此断言没有相关记忆。')
-      return { ok: true, data: { facts: memory.searchMemory(String(args.query), args.scope as string | undefined, Number(args.limit ?? 5)) } }
+      context.memorySearched = true
+      if (args.scope !== undefined && !memory.hasScope(String(args.scope))) return { ...fail('UNKNOWN_MEMORY_SCOPE', '分组未知；请依据availableTopics的分组/名称改写关键词或省略scope重查，不直接当作没有记忆。'), data: { availableTopics: memory.memoryTopics() } }
+      const facts = memory.searchMemory(String(args.query), args.scope as string | undefined, Number(args.limit ?? 5))
+      return { ok: true, data: { facts, ...(facts.length ? {} : { availableTopics: memory.memoryTopics(), hint: '以上只列主题元数据，没有载入全部记忆。按与问题相关的主题名称改写关键词再查。' }) } }
     }
     if (name === 'propose_memory') {
       const fact = memory.validateFact({ scope: String(args.scope), key: String(args.key), value: String(args.value), expiresAt: args.expiresAt as string | undefined })
       const before = memory.findFact(fact.scope, fact.key)
+      if (unsupportedMemoryTimes(fact.value, `${context.evidenceText ?? ''}\n${before?.value ?? ''}`).length) return fail('UNSUPPORTED_MEMORY_TIME', '记忆中出现了用户和已读取事实未给出的具体钟点。保留上午第一节等原始表述，或询问用户，不能自行换算为具体时刻。')
       return { ok: true, data: { fact, before, saved: false }, pause: 'awaiting_confirmation', pending: { type: 'memory', fact, before, expectedVersion: before?.version ?? null } }
     }
     if (name === 'get_study_documents') return { ok: true, data: { documents: listForAgent() } }
@@ -139,7 +155,9 @@ export function executeTool(name: string, raw: string, context: ToolContext): To
     if (name === 'preview_plan') {
       if (!context.runId) return fail('INVALID_CONTEXT', '缺少当前对话。')
       if ((args.taskIds as number[]).some(id => !context.observed.has(id))) return fail('READ_REQUIRED', '请先查询本次运行中所需的任务。')
+      context.planAttempted = true
       const result = planning.preview(args.taskIds as number[], String(args.startDate), String(args.endDate), context.runId, Date.now(), { startMin: args.dailyStartMin as number | undefined, endMin: args.dailyEndMin as number | undefined })
+      context.feasiblePreviewId = result.blocks.length ? result.id : undefined
       return { ok: true, data: readableTimes({ ...result, previewId: result.id, saved: false }) }
     }
     if (name === 'propose_plan') {
@@ -155,8 +173,17 @@ export function executeTool(name: string, raw: string, context: ToolContext): To
       .filter(t => !args.taskIds || (args.taskIds as number[]).includes(t.id))
       .filter(t => !args.query || `${t.content} ${t.summary ?? ''}`.toLocaleLowerCase().includes(String(args.query).toLocaleLowerCase()))
     const selected = list.slice(0, Number(args.limit ?? (Array.isArray(args.taskIds) ? args.taskIds.length : 10)))
+    context.taskLookupEmpty = selected.length === 0
     selected.forEach(t => context.observed.set(t.id, t.updatedAt))
     return { ok: true, data: { tasks: selected.map(view), totalMatches: list.length, truncated: selected.length < list.length } }
+  }
+  if ((name === 'finish_reply' || (name === 'respond' && args.mode === 'answer')) && context.requireMemoryRead && !context.memorySearched && memory.memoryTopics().length) return fail('MEMORY_READ_REQUIRED', '用户明确要求依据已确认记忆回答，但本轮还未检索记忆。先按相关主题调用search_memory，不能把课表空白当作用户没有值班或个人限制。')
+  if (['ask_user','respond','finish_reply'].includes(name) && context.requirePlanProposal && context.feasiblePreviewId) return fail('PLAN_CARD_REQUIRED', `本次请求明确要求展示确认卡片，已有可行试排${context.feasiblePreviewId}。请调用propose_plan并引用该previewId，不能用口头询问替代确认卡；失败可重新试排。`)
+  if (['finish_reply','respond','ask_user'].includes(name) && context.requirePlanAttempt && !context.planAttempted && !context.taskLookupEmpty) {
+    const known = [...context.observed.keys()].map(id => tasks.getTaskById(id)).filter((t): t is Task => !!t)
+    const closing = name === 'finish_reply' || (name === 'respond' && args.mode === 'answer')
+    const uniqueReady = known.length === 1 && known[0].deadlineConfirmed && known[0].baseEstimateMin > 0
+    if ((closing && (!known.length || known.some(t => t.deadlineConfirmed && t.baseEstimateMin > 0))) || uniqueReady) return fail('PLAN_ATTEMPT_REQUIRED', '用户明确要求实际试排，但本轮尚未执行preview_plan。不能用空档或口头推断冒充试排结果；先读取真实任务并调用试排。缺信息可以提问，不要求一定排成功。')
   }
   if (name === 'ask_user') return { ok: true, data: { question: args.question, options: choices(args.options) }, pause: 'waiting_user' }
   if (name === 'finish_reply') return { ok: true, data: { text: args.text }, pause: 'completed' }
